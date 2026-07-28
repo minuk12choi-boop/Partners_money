@@ -34,7 +34,8 @@ OneDrive 안에 두지 않는다. 24시간 무인 운영 중 동기화가 `deals
 | `src/partners_link.py` | ✅ **생성 검증 완료** (T3-a) |
 | `src/threads_post.py` | 🟡 문구 생성은 실데이터로 검증. **API 호출 경로 미검증** |
 | `src/run_all.py` | 🟡 구조만 |
-| `src/threads_auth.py` | ❌ **아직 없음.** TASKS.md T4 에서 작성해야 함 |
+| `src/threads_auth.py` | 🟡 **작성 완료.** Meta 콘솔 설정 대기 중 |
+| `src/env.py` | ✅ 신규. `.env` 로더 (단위 시험 통과) |
 
 **`deals.db` 현재 내용**: 333건 (쿠팡 221 / 토스 112).
 `affiliate_url` 이 채워진 건 각 1건씩 총 2건. 발행된 건은 없다.
@@ -136,10 +137,41 @@ Ctrl+S 이후 흐름은 3단계이며, 마지막 완료 알림은 **Win32 객체
 
 ## 다음에 할 일 — 우선순위 순
 
-### 1. T4 — Threads 인증 (`src/threads_auth.py` 신규 작성)
+### 1. T4 — Threads 발행 🔴 **여기가 마지막 관문**
 
-아직 저장소에 없다. TASKS.md T4 참고.
-Meta 개발자 콘솔 앱 생성 → 테스터 등록 → OAuth → 장기 토큰 → `token.json`.
+`src/threads_auth.py` 는 **작성 완료**다. 막힌 건 코드가 아니라
+**Meta 개발자 콘솔 작업(사람이 해야 함)** 이다.
+
+**사람이 할 일**
+
+1. https://developers.facebook.com 에서 앱 생성
+2. 앱에 'Threads API' 제품 추가
+3. 본인 Threads 계정을 테스터로 등록 → Threads 앱에서 **초대 수락**
+   (`threads.net/settings/account` → 웹사이트 권한)
+4. 리디렉션 URI 등록 (`https://localhost/` 로 충분하다.
+   로컬 서버를 안 띄우고 주소창 URL 을 복사해 쓰기 때문)
+5. 저장소 루트 `.env` 에 적기
+
+   ```
+   THREADS_APP_ID=...
+   THREADS_APP_SECRET=...
+   THREADS_REDIRECT_URI=https://localhost/
+   ```
+
+**그다음**
+
+```
+py src/threads_auth.py            # 인증 URL 출력 → 주소 붙여넣기 → token.json
+py src/threads_auth.py --check    # 토큰 살아 있는지 확인
+py src/threads_post.py --dry-run  # 문구 확인
+py src/threads_post.py            # 실제 발행 1건  ← 미검증 구간
+```
+
+개발 모드에서 본인 계정만 쓰면 앱 심사 없이 동작할 수 있다.
+심사 신청 전에 먼저 시도해 볼 것.
+
+**미검증**: Threads API 호출 경로 전체. 컨테이너 생성 → 30초 대기 → 발행
+흐름을 한 번도 돌려본 적이 없다.
 
 ### 2. T5 전에 반드시 확인할 것
 

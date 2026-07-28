@@ -766,9 +766,51 @@ py src/toss_link.py --limit 1    # 실제 발급
 5. `GET /me?fields=id`로 `user_id` 조회
 6. `token.json` 생성 (`.gitignore`에 있으니 커밋되지 않는다)
 
-**만들 것**: `src/threads_auth.py`
-- 인증 URL을 출력하고, 사용자가 붙여넣은 code를 받아 장기 토큰까지 교환해 `token.json` 저장
-- 이 저장소에 아직 없다. 새로 작성할 것.
+**만들 것**: `src/threads_auth.py` — ✅ **작성 완료 (2026-07-29)**
+
+```
+py src/threads_auth.py            # 인증 URL 출력 → 붙여넣기 → token.json 저장
+py src/threads_auth.py --check    # 지금 토큰이 살아 있는지만 확인
+```
+
+**관측:** (2026-07-29, 공식 문서로 엔드포인트 확인)
+
+> 추측으로 쓰면 소유자가 Meta 콘솔에서 헛수고를 하게 되므로 문서로 확인했다.
+> 출처: `developers.facebook.com/docs/threads/get-started/get-access-tokens-and-permissions`
+>
+> | 단계 | 메서드 | 주소 |
+> |---|---|---|
+> | 승인 | 브라우저 | `https://threads.net/oauth/authorize` |
+> | 코드 → 단기(1시간) | POST | `https://graph.threads.net/oauth/access_token` |
+> | 단기 → 장기(60일) | GET | `https://graph.threads.net/access_token` `grant_type=th_exchange_token` |
+> | 갱신 | GET | `https://graph.threads.net/refresh_access_token` `grant_type=th_refresh_token` |
+>
+> 갱신 엔드포인트는 `threads_post.py` 가 이미 쓰던 것과 일치한다.
+>
+> **⚠️ 함정: 인증 코드 끝에 `#_` 가 붙어서 돌아온다.** 공식 문서가 명시한
+> 동작이고 코드의 일부가 아니다. 안 떼면 교환이 실패한다.
+> `extract_code()` 가 주소 통째로 붙여넣기 / 코드만 붙여넣기 / 따옴표 포함 /
+> 승인 거부(`error=`) 를 모두 처리한다. 단위 시험으로 확인했다.
+>
+> 리디렉션 URI 는 **로컬 서버를 띄우지 않는다.** 승인 후 주소창의 URL 을
+> 복사해 붙여넣는 방식이라 실제로 열리지 않는 주소여도 된다.
+> 다만 콘솔에 등록한 값과 **끝의 슬래시까지** 정확히 같아야 한다.
+
+**🔴 `.env` 를 읽는 코드가 아무 데도 없었다 — 수정함 (2026-07-29)**
+
+> `.env.example` 은 "복사해서 `.env` 로 쓰거나 시스템 환경변수로 설정" 이라고
+> 안내하는데, 실제로 `.env` 를 읽는 코드가 저장소 어디에도 없었다.
+> `python-dotenv` 도 `requirements.txt` 에 없다. `.env` 에 값을 적어 두면
+> **아무 일도 일어나지 않았다.**
+>
+> 조용히 위험한 지점은 `run_all.py` 의 `notify()` 다. 토큰이 없으면 그냥
+> return 하므로 **실패 알림이 영원히 안 온다.** 무인 운영에서 최악은 조용히
+> 멈추는 것인데, 알림 자체가 조용히 죽어 있는 상태였다. T5 에서 물렸을 것이다.
+>
+> 새 의존성 없이 `src/env.py` 를 만들었다(표준 라이브러리만).
+> `threads_post.py` 와 `run_all.py` 가 시작할 때 `load_env()` 를 부른다.
+> 시스템 환경변수를 덮어쓰지 않고, 빈 값은 무시한다.
+> (`.env.example` 을 그대로 복사해 두면 빈 값들이 "설정됨" 으로 오인된다.)
 
 **검증 순서**
 ```

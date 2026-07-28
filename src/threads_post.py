@@ -31,6 +31,12 @@ from datetime import datetime, date
 
 import requests
 
+from env import load_env
+
+# `.env` 를 환경변수로 올린다. 예전에는 이걸 하는 코드가 없어서
+# `.env` 에 적은 값이 아무 효과가 없었다(실측 2026-07-29).
+load_env()
+
 BASE = "https://graph.threads.net/v1.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(HERE, "deals.db")

@@ -23,6 +23,13 @@ import time
 import traceback
 from datetime import datetime
 
+from env import load_env
+
+# `.env` 를 환경변수로 올린다. 예전에는 이걸 하는 코드가 없어서
+# `.env` 에 TG_BOT_TOKEN 을 적어도 notify() 가 조용히 아무것도 안 했다.
+# 무인 운영에서 알림이 죽어 있으면 조용히 멈춘 것과 구분이 안 된다.
+load_env()
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 LOG_PATH = os.path.join(HERE, "run.log")
