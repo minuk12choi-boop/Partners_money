@@ -200,7 +200,7 @@ def is_dialog_open(pid, title=None):
     return wait_window(title or DLG_DONE, pid=pid, cls=None, timeout=0.5) is not None
 
 
-def wait_file_ready(path, before_mtime, timeout=180, settle=1.5):
+def wait_file_ready(path, before_mtime, timeout=120, settle=1.5):
     """파일이 새로 쓰이고 크기가 안정될 때까지 기다린다.
 
     '대화 내보내기' 알림은 진행률 0% 상태에서 이미 떠 있다.
@@ -210,6 +210,7 @@ def wait_file_ready(path, before_mtime, timeout=180, settle=1.5):
     """
     deadline = time.time() + timeout
     last_size, stable_since = -1, None
+    next_report = time.time() + 5
     while time.time() < deadline:
         try:
             st = os.stat(path)
@@ -224,11 +225,41 @@ def wait_file_ready(path, before_mtime, timeout=180, settle=1.5):
                     return True
             else:
                 last_size, stable_since = st.st_size, None
+        # 멈춘 것처럼 보이지 않게 진행 상황을 알린다.
+        # 무인 운영에서 조용한 대기는 조용한 정지와 구분이 안 된다.
+        if time.time() >= next_report:
+            print(f"    저장 대기 중... {max(0, last_size):,} bytes")
+            next_report = time.time() + 5
         time.sleep(0.3)
     return False
 
 
-def close_done_dialog(pid, out_path, before_mtime, chat_win=None, timeout=60):
+def dump_descendants(win, label="자식 창", limit=40):
+    """창의 자식들을 훑는다. 인앱 모달은 최상위 창 목록에 안 나오므로
+    채팅방 창 아래를 봐야 한다."""
+    print(f"  ── {label} " + "─" * 30)
+    try:
+        kids = win.descendants()
+    except Exception:
+        try:
+            kids = win.children()
+        except Exception as e:
+            print(f"     조회 실패: {e}")
+            return
+    print(f"     {len(kids)}개")
+    for ch in kids[:limit]:
+        try:
+            t = ch.window_text()
+            c = ch.class_name()
+            if not t and c in ("", "Static"):
+                continue
+            print(f"       class={c!r} text={t!r} rect={ch.rectangle()}")
+        except Exception:
+            pass
+    print("  " + "─" * 38)
+
+
+def close_done_dialog(pid, out_path, before_mtime, chat_win=None, timeout=15):
     """저장 완료 알림('대화 내보내기')을 닫는다.
 
     카톡이 내보내기를 마치면 '완료되었습니다' 알림을 띄우고,
@@ -242,15 +273,20 @@ def close_done_dialog(pid, out_path, before_mtime, chat_win=None, timeout=60):
     찾으면 실제 클래스명을 로그에 남긴다. 다음 실행 로그에서 그 값을
     확인해 TASKS.md 관측 항목에 기록할 것.
     """
+    # 이 알림은 최상위 창이 아니라 카톡 창 안에 그려지는 인앱 모달로 보인다.
+    # (--mode dialog 관측에서 최상위 창 17개 중 '대화 내보내기' 가 없었고,
+    #  화면상 채팅방이 어둡게 깔린 위에 떠 있다)
+    # 그래서 못 찾는 것이 정상이며, 못 찾았다고 실패로 처리하면 안 된다.
     done = wait_window(DLG_DONE, pid=pid, cls=None, timeout=timeout)
     if done is None:
-        print(f"  완료 알림('{DLG_DONE}')을 찾지 못했습니다. 창이 남아 있을 수 있습니다.")
-        return False
-
-    try:
-        print(f"  완료 알림 감지 (class={done.class_name()!r}) → 저장 완료 대기")
-    except Exception:
-        print("  완료 알림 감지 → 저장 완료 대기")
+        print(f"  '{DLG_DONE}' 이 최상위 창에 없음 → 인앱 모달로 보고 진행합니다.")
+        if chat_win is not None:
+            dump_descendants(chat_win, "채팅방 창의 자식(모달 탐색)")
+    else:
+        try:
+            print(f"  완료 알림 감지 (class={done.class_name()!r})")
+        except Exception:
+            print("  완료 알림 감지")
 
     if wait_file_ready(out_path, before_mtime):
         print("  저장 완료 확인")
@@ -261,66 +297,45 @@ def close_done_dialog(pid, out_path, before_mtime, chat_win=None, timeout=60):
     # 파일이 다 쓰여도 게이지가 100% 로 바뀌기까지 시간이 더 걸린다.
     time.sleep(SETTLE_AFTER_SAVE)
 
-    # 처음 한 번은 이 창의 정체를 통째로 찍어 둔다.
-    # 클래스명조차 아직 관측되지 않아서, 실패하면 원인을 알 수 없다.
-    dump_window_info(done, "완료 알림창")
+    if done is not None:
+        dump_window_info(done, "완료 알림창")
 
-    # 여러 전략을 순서대로 시도한다. 어느 것이 통했는지 로그에 남겨
-    # 다음번에 그것만 남기고 정리할 수 있게 한다.
-    def s_button():
-        return click_button(done, BTN_DONE_OK, timeout=2)
+    # 인앱 모달이라 최상위 창으로 잡히지 않는 경우가 정상이다.
+    # 그래서 '카톡 채팅방 창에 포커스를 주고 Enter' 가 주 전략이다.
+    # 이 방이 '관리자만 말할 수 있는 상태' 라 Enter 가 새어 나가도
+    # 메시지가 전송되지 않는다. 그래도 필요 이상으로 보내지는 않는다.
+    for attempt in range(1, 4):
+        if done is not None and click_button(done, BTN_DONE_OK, timeout=2):
+            if not is_dialog_open(pid):
+                print("  ✅ 닫힘 — 버튼 클릭")
+                return True
 
-    def s_chat_focus_enter():
-        # 알림창 자체에는 set_focus 가 먹지 않는다(실측).
-        # 카톡 채팅방 창에 포커스를 줘야 Enter 가 전달된다는 관측에 따른 것.
         target = chat_win if chat_win is not None else done
-        target.set_focus()
-        time.sleep(1.0)
-        send_keys("{ENTER}")
-        return True
-
-    def s_dialog_focus_enter():
-        done.set_focus()
-        time.sleep(0.8)
-        send_keys("{ENTER}")
-        return True
-
-    def s_click_dialog_then_enter():
-        # 알림창 본문을 한 번 클릭해 활성화한 뒤 Enter.
-        # 버튼이 아니라 여백을 눌러야 하므로 위쪽 가운데를 친다.
-        click_by_ratio(done, 0.5, 0.25, " (본문 활성화)")
-        time.sleep(0.6)
-        send_keys("{ENTER}")
-        return True
-
-    def s_click_ok_button():
-        # 최후의 수단. 스크린샷 기준 '확인'은 오른쪽 아래에 있다.
-        # ('폴더열기'는 왼쪽이라 충분히 떨어져 있다)
-        return click_by_ratio(done, 0.67, 0.85, " ('확인' 위치)")
-
-    strategies = [
-        ("버튼 클릭", s_button),
-        ("카톡창 포커스 + Enter", s_chat_focus_enter),
-        ("알림창 포커스 + Enter", s_dialog_focus_enter),
-        ("알림창 클릭 + Enter", s_click_dialog_then_enter),
-        ("'확인' 좌표 클릭", s_click_ok_button),
-    ]
-
-    for name, fn in strategies:
+        if target is None:
+            print("  포커스를 줄 창이 없습니다.")
+            break
         try:
-            fn()
+            target.set_focus()
+            time.sleep(1.0)
+            send_keys("{ENTER}")
         except Exception as e:
-            print(f"  [{name}] 예외: {e}")
-            continue
-        time.sleep(1.2)
-        if not is_dialog_open(pid):
-            print(f"  ✅ 닫힘 — 통한 방법: {name}")
+            print(f"  포커스/Enter 실패: {e}")
+        time.sleep(1.5)
+
+        if done is not None and not is_dialog_open(pid):
+            print(f"  ✅ 닫힘 — 카톡창 포커스 + Enter (시도 {attempt}회)")
             return True
-        print(f"  [{name}] 실패, 다음 방법 시도")
+        if done is None:
+            # 최상위 창으로 안 잡히니 닫힘 여부를 창 목록으로 확인할 수 없다.
+            # 한 번만 보내고 넘어간다. 남아 있으면 다음 실행 로그로 드러난다.
+            print(f"  카톡창 포커스 + Enter 전송 (시도 {attempt}회)")
+            print("  ※ 인앱 모달이라 닫힘 여부를 창 목록으로 확인할 수 없습니다.")
+            return True
+        print(f"  아직 열려 있음 → 재시도 {attempt}/3")
 
     print("  ❌ 완료 알림을 닫지 못했습니다. 다음 주기의 Ctrl+S 가 막힙니다.")
-    print("     위의 '완료 알림창 상세' 를 확인해 주세요.")
-    dump_window_info(done, "닫기 실패 후 상태")
+    if done is not None:
+        dump_window_info(done, "닫기 실패 후 상태")
     return False
 
 
