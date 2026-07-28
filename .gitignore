@@ -10,6 +10,7 @@ deals.db
 export.txt
 pending.csv
 selectors.json
+toss_selectors.json
 run.log
 status.json
 shots/

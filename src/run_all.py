@@ -104,14 +104,25 @@ def cycle(room, dry_run=False):
                      timeout=600)
     results["extract"] = ok
 
-    # 3) 파트너스 링크 생성
-    ok, out = run_step("파트너스 링크 생성",
+    # 3) 쿠팡 파트너스 링크 생성
+    ok, out = run_step("쿠팡 파트너스 링크 생성",
                        [PY, "partners_link.py", "--limit", str(MAX_LINKS_PER_CYCLE)],
                        timeout=900)
     results["link"] = ok
     if "세션 만료" in out:
-        notify("파트너스 세션이 만료되었습니다. partners_link.py --login 을 실행하세요.")
+        notify("쿠팡 파트너스 세션이 만료되었습니다. partners_link.py --login 을 실행하세요.")
         results["link"] = False
+
+    # 3-2) 토스 쉐어링크 발급
+    # 쿠팡과 독립이다. 한쪽이 실패해도 다른 쪽은 계속 돈다.
+    # 토스는 딜방이 아니라 쉐어링크 대시보드 목록에서 상품을 고른다.
+    ok, out = run_step("토스 쉐어링크 발급",
+                       [PY, "toss_link.py", "--limit", str(MAX_LINKS_PER_CYCLE)],
+                       timeout=900)
+    results["toss_link"] = ok
+    if "세션 만료" in out:
+        notify("토스 쉐어링크 세션이 만료되었습니다. toss_link.py --login 을 실행하세요.")
+        results["toss_link"] = False
 
     # 4) 스레드 발행
     cmd = [PY, "threads_post.py"]
@@ -140,7 +151,10 @@ def main():
             results, err = cycle(args.room, args.dry_run)
             write_status(last_cycle=results, error=err, consecutive_fails=fails)
 
-            critical_ok = results.get("extract") and results.get("link")
+            # 쿠팡과 토스 중 한쪽이라도 링크가 나오면 파이프라인은 살아 있다.
+            # 둘 다 실패해야 핵심 실패로 본다.
+            any_link = results.get("link") or results.get("toss_link")
+            critical_ok = results.get("extract") and any_link
             if critical_ok:
                 if fails:
                     notify(f"{fails}회 실패 후 복구되었습니다.")
