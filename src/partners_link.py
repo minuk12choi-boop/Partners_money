@@ -39,6 +39,19 @@ SHOT_DIR = os.path.join(HERE, "shots")
 LINK_PAGE = "https://partners.coupang.com/#affiliate/ws/link"
 RE_SHORT = re.compile(r"https?://link\.coupang\.com/[A-Za-z0-9/_\-\?\=\&\.%]+")
 
+# ── 접근 빈도 제한 (CLAUDE.md 제약 2) ────────────────────────────
+# run_all.py 의 MAX_LINKS_PER_CYCLE 과 같은 값이다. 그쪽은 --limit 로
+# 넘겨주지만, 이 스크립트를 직접 실행할 때도 상한이 걸려야 한다.
+# toss_link.py 가 이미 같은 방식으로 자기 상한을 강제한다.
+MAX_LINKS_PER_RUN = 4
+
+# 자가탐색은 조합마다 페이지를 새로 열고 폼을 채워 제출한다.
+# 입력창 5개 x 버튼 4개면 20번을 쉬지 않고 두드리게 되는데, 이건
+# 사람의 행동이 아니다. 시도 횟수를 줄이고 사이에 간격을 둔다.
+MAX_DISCOVER_ATTEMPTS = 8
+SLEEP_BETWEEN = 6
+# ─────────────────────────────────────────────────────────────────
+
 # 페이지 안의 모든 input/textarea 후보를 뽑고 점수를 매기는 JS
 JS_SCAN_INPUTS = """() => {
   const out = [];
@@ -186,20 +199,39 @@ def attempt(page, input_sel, button_text, product_url, wait=22):
 
 
 def discover(page, product_url):
-    """셀렉터 조합을 탐색한다. 성공하면 (link, input_sel, button_text)."""
+    """셀렉터 조합을 탐색한다. 성공하면 (link, input_sel, button_text).
+
+    ⚠️ 한 번 시도할 때마다 페이지를 새로 열고 폼을 채워 제출한다.
+    즉 시도 횟수가 곧 파트너스 사이트 접근 횟수다. 예전에는 5x4=20 번을
+    쉬지 않고 두드렸는데, 이건 CLAUDE.md 제약 2 를 정면으로 어긴다.
+    시도 상한을 두고 사이에 간격을 준다. 이 값들을 올리지 말 것.
+    """
     goto_link_page(page)
     inputs = page.evaluate(JS_SCAN_INPUTS)
     buttons = page.evaluate(JS_SCAN_BUTTONS)
     log(f"탐색: 입력창 후보 {len(inputs)}개, 버튼 후보 {len(buttons)}개")
 
+    # 점수순으로 이미 정렬돼 있다. 유망한 조합부터 나오도록 짝을 만든다.
     btn_texts = [b["text"] for b in buttons] + [None]
-    for inp in inputs[:5]:
-        for bt in btn_texts[:4]:
-            log(f"  시도: input={inp['path'][:50]!r} button={bt!r}")
-            link = attempt(page, inp["path"], bt, product_url, wait=14)
-            if link:
-                log(f"  → 성공. 조합을 캐시합니다.")
-                return link, inp["path"], bt
+    combos = [(inp, bt) for inp in inputs[:5] for bt in btn_texts[:4]]
+    if len(combos) > MAX_DISCOVER_ATTEMPTS:
+        log(f"조합 {len(combos)}개 중 상위 {MAX_DISCOVER_ATTEMPTS}개만 시도합니다 "
+            f"(접근 빈도 제한). 전부 실패하면 실제 DOM 을 관측해 "
+            f"selectors.json 을 직접 채우세요.")
+        combos = combos[:MAX_DISCOVER_ATTEMPTS]
+
+    for i, (inp, bt) in enumerate(combos):
+        if i:
+            time.sleep(SLEEP_BETWEEN)   # 사람 속도. 줄이지 마세요.
+        log(f"  시도 {i+1}/{len(combos)}: "
+            f"input={inp['path'][:50]!r} button={bt!r}")
+        link = attempt(page, inp["path"], bt, product_url, wait=14)
+        if link:
+            log("  → 성공. 조합을 캐시합니다.")
+            return link, inp["path"], bt
+
+    log("자가탐색 실패. 재시도 루프를 돌리지 마세요 — 계정이 위험합니다.")
+    log("tools/observe_coupang.py 로 실제 DOM 을 관측한 뒤 고치세요.")
     return None, None, None
 
 
@@ -282,7 +314,7 @@ def do_run(limit):
             conn.commit()
             ok += 1
             log(f"  + [{pid}] {title[:35]} → {link}")
-            time.sleep(6)   # 사람 속도. 줄이지 마세요.
+            time.sleep(SLEEP_BETWEEN)   # 사람 속도. 줄이지 마세요.
 
         ctx.close()
 
@@ -294,12 +326,16 @@ def do_run(limit):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--login", action="store_true")
-    ap.add_argument("--limit", type=int, default=10)
+    ap.add_argument("--limit", type=int, default=MAX_LINKS_PER_RUN,
+                    help=f"한 번에 만들 최대 개수 (기본 {MAX_LINKS_PER_RUN})")
     args = ap.parse_args()
     if args.login:
         do_login()
-    else:
-        do_run(args.limit)
+        return
+    limit = min(args.limit, MAX_LINKS_PER_RUN)
+    if limit < args.limit:
+        log(f"--limit 을 {MAX_LINKS_PER_RUN} 로 낮춥니다 (접근 빈도 제한)")
+    do_run(limit)
 
 
 if __name__ == "__main__":
