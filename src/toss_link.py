@@ -63,6 +63,12 @@ MAX_LINKS_PER_RUN = 4
 SLEEP_BETWEEN = 6
 # ─────────────────────────────────────────────────────────────────
 
+# 이 가격을 넘는 상품은 고르지 않는다. 소유자가 정한 값이다(2026-07-29).
+# 대시보드에는 118만원 정수기, 67만원 냉장고 같은 고가 가전이 섞여 있는데
+# 딜방 가격 중앙값은 24,800원이다. 상한이 없으면 그런 것들이 올라간다.
+# --max-price 로 실행할 때 덮어쓸 수 있다.
+MAX_PRICE = 200_000
+
 BTN_ISSUE = "링크 발급"
 
 
@@ -402,13 +408,12 @@ def pick(cards, conn, limit, max_price=None):
     118만원 정수기·67만원 냉장고만 골라내고 있었다. 딜방 성격(중앙값
     24,800원)과도 맞지 않고 고가 가전은 전환도 거의 없다.
 
-    대신 '얼마나 싸게 사는가' 로 고른다.
+    대신 '얼마나 싸게 사는가' 로 고른다. 소유자가 확정한 기준이다
+    (2026-07-29). 임의로 바꾸지 말 것.
+      0. 20만원 초과 제외 (MAX_PRICE)
       1. 30일 최저가 표시가 있는 것 우선
       2. 특가율(%) 높은 순
       3. 리뷰 수 많은 순 — 같은 특가율이면 검증된 상품으로
-
-    ※ 이 순서는 잠정값이다. 무엇을 올릴지는 사업 판단이라
-      소유자 확인이 필요하다. TASKS.md T3-b 참고.
     """
     seen = known_titles(conn)
     fresh = []
@@ -445,7 +450,7 @@ def do_login():
         ctx.close()
 
 
-def do_run(limit, dry_run, max_price=None):
+def do_run(limit, dry_run, max_price=MAX_PRICE):
     conn = sqlite3.connect(DB_PATH)
     ensure_schema(conn)
     os.makedirs(SHOT_DIR, exist_ok=True)
@@ -531,8 +536,9 @@ def main():
                     help=f"한 번에 발급할 최대 개수 (기본 {MAX_LINKS_PER_RUN})")
     ap.add_argument("--dry-run", action="store_true",
                     help="발급하지 않고 대상 목록만 출력")
-    ap.add_argument("--max-price", type=int, default=None,
-                    help="이 가격을 넘는 상품은 고르지 않는다 (원). 기본: 제한 없음")
+    ap.add_argument("--max-price", type=int, default=MAX_PRICE,
+                    help=f"이 가격을 넘는 상품은 고르지 않는다 (원). "
+                         f"기본 {MAX_PRICE:,}원. 0 이면 제한 없음")
     args = ap.parse_args()
 
     if args.login:
@@ -542,7 +548,9 @@ def main():
     limit = min(args.limit, MAX_LINKS_PER_RUN)
     if limit < args.limit:
         log(f"--limit 을 {MAX_LINKS_PER_RUN} 로 낮춥니다 (접근 빈도 제한)")
-    do_run(limit, args.dry_run, args.max_price)
+    # 0 을 '제한 없음' 으로 쓴다. None 을 넘기려면 명시적인 값이 필요하다.
+    max_price = args.max_price if args.max_price and args.max_price > 0 else None
+    do_run(limit, args.dry_run, max_price)
 
 
 if __name__ == "__main__":

@@ -7,27 +7,35 @@
 작업 브랜치: `claude/partners-money-repo-v9jgbv`
 PR: https://github.com/minuk12choi-boop/Partners_money/pull/1 (draft)
 
+**작업 디렉터리는 `C:\Users\dkrt\Partners_money` 하나다** (2026-07-29 확정).
+OneDrive 안에 두지 않는다. 24시간 무인 운영 중 동기화가 `deals.db`(SQLite)
+쓰기에 끼어들면 손상될 수 있고, `pw_*_profile/` 의 수백 개 파일이 계속
+동기화된다. 경로에 공백·한글이 없는 것도 이유다.
+
 ---
 
 ## 한눈에 보는 현재 상태
 
 ```
 카톡방 ─→ 추출 ─→ deals.db ─┬─→ partners_link.py ─→ 쿠팡 딥링크 ─┐
-  ✅        ✅        ✅      │        🔴 미검증                    ├─→ threads_post.py
+  ✅        ✅        ✅      │   🔴 로그인 안 됨                   ├─→ threads_post.py
                              │                                    │      🔴 미검증
 쉐어링크 대시보드 ───────────┴─→ toss_link.py ────→ 토스 쉐어링크 ─┘
-       ✅ 관측됨                   🔴 미검증
+       ✅ 관측됨                   ✅ 발급 검증됨
 ```
 
 | 파일 | 상태 |
 |---|---|
 | `src/kakao_export.py` | ✅ **실제 환경 검증 완료** (T1) |
 | `src/kakao_deal_extract.py` | ✅ 실제 export.txt 6,500줄로 검증 (T2 대부분) |
-| `src/partners_link.py` | 🔴 **완전 미검증** — 다음 관문 |
-| `src/toss_link.py` | 🔴 **미검증 (신규 작성)** — 다음 관문 |
+| `src/toss_link.py` | ✅ **발급 검증 완료** (T3-b) |
+| `src/partners_link.py` | 🔴 **로그인 세션 없음** — 다음 관문 (T3-a) |
 | `src/threads_post.py` | 🟡 문구 생성만 검증. API 호출 경로 미검증 |
 | `src/run_all.py` | 🟡 구조만 |
 | `src/threads_auth.py` | ❌ **아직 없음.** TASKS.md T4 에서 작성해야 함 |
+
+**`deals.db` 현재 내용**: 333건 (쿠팡 221 / 토스 112).
+`affiliate_url` 이 채워진 건 토스 1건뿐이다.
 
 ---
 
@@ -60,50 +68,71 @@ Ctrl+S 이후 흐름은 3단계이며, 마지막 완료 알림은 **Win32 객체
 
 ---
 
+### T3-b — 토스 쉐어링크 발급 ✅
+
+**실제로 발급된다.** 실측 1건:
+
+```
+프리미엄 엠머 파로 효소, 3g, 14포, 4박스   9,900원  92% 특가  30일최저
+  상품ID 162535755 → https://toss.im/_m/Hxt0f2Gi
+  링크 열기 → toss.shopping/t/162535755?k=...&referrer=affiliate
+```
+
+핵심만: **발급된 링크는 DOM 에 전혀 나타나지 않는다.** 화면에는
+'링크를 복사했어요.' 토스트만 뜨고 링크는 클립보드로 간다. 그래서
+화면을 긁던 기존 방식은 원리적으로 실패했다. 발급 API 응답을
+가로채는 방식으로 바꿨고, 그 응답의 `originUrl` 에 상품 ID 까지
+들어 있어 새 탭으로 확인하던 단계가 통째로 없어졌다.
+
+자세한 것은 `TASKS.md` 의 T3-b `관측:` 항목들에 있다.
+
+### T2 — 딜 추출 ✅ 실행됨
+
+`deals.db` 에 333건(쿠팡 221 / 토스 112)이 들어 있다.
+다시 돌릴 필요 없다.
+
+---
+
 ## 다음에 할 일 — 우선순위 순
 
-### 1. 토스 링크 발급 검증 (`src/toss_link.py`)
-
-```
-py src\toss_link.py --login      # 최초 1회. 토스 비즈니스 계정
-py src\toss_link.py --dry-run    # 발급 없이 대상 목록만
-py src\toss_link.py --limit 1    # 실제 발급
-```
-
-**확인할 것**
-- 상품 카드가 스캔되는가 (`상품 카드 N개 발견`)
-- 상품명·가격·개당 수익이 제대로 읽히는가
-- `링크 발급` 클릭 후 `toss.im/_m/...` 링크가 잡히는가
-- 발급된 링크로 상품 ID 가 확인되는가
-
-실패하면 `shots/toss_*.png` 를 보고 고친다.
-
-### 2. 쿠팡 파트너스 링크 생성 검증 (`src/partners_link.py`)
+### 1. 🔴 쿠팡 파트너스 로그인 — **사람이 해야 한다. 여기서 막혀 있다**
 
 ```
 py src\partners_link.py --login
-py src\partners_link.py --limit 1
 ```
 
-**주의**: CLAUDE.md 가 "폐기될 코드이므로 과투자 금지" 라고 못 박았다.
-동작하는 수준까지만. 실패해도 재시도 루프를 돌리지 말 것.
-디버깅 중에는 `--limit 1` 만 쓴다.
+`pw_profile/` 이 없다. 이 명령이 한 번도 실행된 적이 없어서
+`partners.coupang.com` 이 `login.coupang.com` 으로 튕긴다.
+로그인 화면에 `pc-otp-login-iframe` 이 있어 추가 인증이 붙을 수 있다.
 
-### 3. 딜 추출 실행
+**소유자 확인 결과: 파트너스 최종승인이 아직 안 났다.**
+따라서 링크 생성 화면이 정상 동작하는지부터가 미지수다.
+CLAUDE.md Phase 0 은 승인 전에도 웹 UI 로 링크를 만들 수 있다는
+전제인데, 그 전제 자체가 아직 확인되지 않았다.
+
+### 2. 쿠팡 링크 생성 관측 (로그인 직후)
 
 ```
-py src\kakao_deal_extract.py src\export.txt
+py tools\observe_coupang.py                                    # 읽기 전용
+py tools\observe_coupang.py --issue "https://www.coupang.com/vp/products/..."
 ```
 
-쿠팡 264 + 토스 115건을 해석한다. 건당 1.2초 대기가 있어 10분 이상
-걸린다. 기존 `deals.db` 는 자동으로 새 스키마로 이전된다.
+**자가탐색(`partners_link.py`)을 돌리기 전에 이걸 먼저 본다.**
+토스에서 배운 것이 여기에도 적용될 수 있다 — 링크가 DOM 이 아니라
+API 응답에만 있을 수 있다. `--issue` 모드가 네트워크까지 기록한다.
 
-### 4. T4 — Threads 인증 (`src/threads_auth.py` 신규 작성)
+확인할 것:
+- 링크 생성 UI 가 **iframe 안에 있는가.** 그러면 `JS_SCAN_INPUTS` 는
+  최상위 document 만 훑으므로 후보를 하나도 못 찾는다.
+  관측 도구가 프레임별 입력창 개수를 세 준다.
+- 응답 본문에 `link.coupang.com` 이 들어오는가
+
+### 3. T4 — Threads 인증 (`src/threads_auth.py` 신규 작성)
 
 아직 저장소에 없다. TASKS.md T4 참고.
 Meta 개발자 콘솔 앱 생성 → 테스터 등록 → OAuth → 장기 토큰 → `token.json`.
 
-### 5. T5 전에 반드시 확인할 것
+### 4. T5 전에 반드시 확인할 것
 
 **채팅방 창이 닫혀 있을 때 자동으로 여는 경로가 미검증이다.**
 방을 열어두고 운영하면 안 타지만, 카톡 재시작 후 방 창이 닫힌 상태로
@@ -111,18 +140,33 @@ Meta 개발자 콘솔 앱 생성 → 테스터 등록 → OAuth → 장기 토�
 
 ---
 
+## 소유자가 확정한 것 (2026-07-29)
+
+| 항목 | 결정 |
+|---|---|
+| 작업 디렉터리 | `C:\Users\dkrt\Partners_money` 하나. OneDrive 밖 |
+| 토스 선별 기준 | 20만원 이하 → 30일최저 → 특가율 → 리뷰수 |
+| 쿠팡 파트너스 | 최종승인 **아직 안 남** |
+
+토스 선별 기준은 `toss_link.py` 의 `MAX_PRICE = 200_000` 과 `pick()` 에
+반영돼 있다. 임의로 바꾸지 말 것.
+
+---
+
 ## 미검증·미해결 목록
 
 | 항목 | 내용 |
 |---|---|
-| `partners_link.py` | DOM 전체 미검증 |
-| `toss_link.py` | 카드 스캔·발급 흐름 미검증 |
+| `partners_link.py` | 로그인 세션이 없어 DOM 을 아직 못 봤다 |
+| 쿠팡 링크 생성 UI 위치 | iframe 안일 가능성. 로그인 후 확인 |
+| 쿠팡 세션 수명 | OTP iframe 이 있다. 만료되면 무인 운영이 멈춘다 |
 | `threads_post.py` | Threads API 호출 경로 전체 미검증 |
 | `threads_auth.py` | 파일 자체가 없음 |
 | 카톡 방 창 자동 열기 | 미검증 (T5 전 필수) |
 | 완료 알림 클래스명 | Win32 객체가 아니라 관측 불가로 확정 |
 | 쿠팡 봇 차단 | 403 을 주지만 리다이렉트로 productId 추출은 성공.<br>나중에 리다이렉트까지 막히면 조용히 실패한다 |
 | 토스 수수료 10% | **9월 25일까지** 프로모션. 영구 요율 아님 |
+| 토스 발급 링크 목록 화면 | 못 찾았다. 계측 중 발급한 2건이 DB 에 없다 |
 
 ---
 
@@ -136,6 +180,10 @@ Meta 개발자 콘솔 앱 생성 → 테스터 등록 → OAuth → 장기 토�
   `build_text()` 의 `assert` 3개를 제거하지 말 것.
 - **`toss_link.py` 도 한 번에 4건, 사이 6초** 를 지킨다.
   쿠팡과 같은 이유다.
+- **`partners_link.py` 의 자가탐색 상한을 올리지 마라.**
+  `MAX_DISCOVER_ATTEMPTS = 8`, 시도 사이 6초. 예전에는 5×4=20회를
+  대기 없이 두드렸는데, 시도 한 번이 곧 페이지 로드 + 폼 제출이라
+  사이트 접근 20회와 같다. 제약 2 위반이었다.
 - `headless=False` 유지.
 
 ---
@@ -144,8 +192,19 @@ Meta 개발자 콘솔 앱 생성 → 테스터 등록 → OAuth → 장기 토�
 
 `TASKS.md` 상단에 적힌 규칙을 그대로 따른다.
 
-- **고치기 전에 관측부터.** 추측으로 덮지 말 것.
-  관측 도구가 `tools/observe_kakao.py`, `tools/observe_toss.py` 에 있다.
+- **고치기 전에 관측부터.** 추측으로 덮지 말 것. 관측 도구:
+
+  | 도구 | 대상 | 부작용 |
+  |---|---|---|
+  | `tools/observe_kakao.py` | 카톡 창·대화상자 | 없음 |
+  | `tools/observe_toss.py` | 쉐어링크 화면 구조 | 없음 |
+  | `tools/observe_toss_cards.py` | 상품 카드 파싱·인덱스 정합성 | 없음 |
+  | `tools/observe_toss_issue.py` | 발급 클릭 계측 | **링크 1건 발급** |
+  | `tools/observe_coupang.py` | 파트너스 링크 화면 | 기본 없음 / `--issue` 는 링크 1건 생성 |
+
+  `observe_toss_cards.py` 와 `observe_toss_issue.py` 는 운영 코드의
+  `JS_SCAN_CARDS` 를 그대로 import 해서 돌린다. 관측 대상과 실제 동작이
+  어긋나면 관측의 의미가 없기 때문이다.
 - 관측한 실제 값은 `TASKS.md` 의 해당 작업 아래 `관측:` 에 기록한다.
 - 작업 단위로 자주 커밋하고 push 한다. 커밋 메시지는 한국어로,
   무엇을 왜 고쳤는지 적는다.
