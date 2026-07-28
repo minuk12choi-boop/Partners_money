@@ -235,9 +235,12 @@ def do_login():
 
 def do_run(limit):
     conn = sqlite3.connect(DB_PATH)
+    # 쿠팡 딜만 가져온다. 이 스크립트는 쿠팡 파트너스 페이지를 쓰므로
+    # 토스 상품 URL 을 넣으면 엉뚱한 링크가 만들어지거나 실패한다.
+    # 토스는 쉐어링크 대시보드를 써야 한다(docs/toss_sharelink.md).
     rows = conn.execute(
         "SELECT product_id, title, product_url FROM deals "
-        "WHERE affiliate_url IS NULL AND posted_at IS NULL "
+        "WHERE platform = 'coupang' AND affiliate_url IS NULL AND posted_at IS NULL "
         "ORDER BY found_at DESC LIMIT ?", (limit,)
     ).fetchall()
 
@@ -273,7 +276,9 @@ def do_run(limit):
                 fail += 1
                 continue
 
-            conn.execute("UPDATE deals SET affiliate_url=? WHERE product_id=?", (link, pid))
+            conn.execute(
+                "UPDATE deals SET affiliate_url=? "
+                "WHERE platform='coupang' AND product_id=?", (link, pid))
             conn.commit()
             ok += 1
             log(f"  + [{pid}] {title[:35]} → {link}")

@@ -40,16 +40,39 @@ TOKEN_PATH = os.path.join(HERE, "token.json")
 # ── 정책 관련 상수 ────────────────────────────────────────────────
 # 쿠팡 파트너스 필수 고지. 절대 지우지 말 것.
 DISCLOSURE = "이 게시물은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다."
+
+# 토스쇼핑 쉐어링크 필수 고지. 문구도 위치 규정도 쿠팡과 다르다.
+# 운영 정책상 "게시물 제목이나 첫 부분에" 노출해야 한다.
+# 두 문구를 섞어 쓰면 양쪽 다 위반이다. (docs/toss_sharelink.md 참고)
+TOSS_DISCLOSURE = "이 포스팅은 토스쇼핑 쉐어링크 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다."
+
+DISCLOSURES = {
+    "coupang": DISCLOSURE,
+    "toss": TOSS_DISCLOSURE,
+}
+
 MAX_CHARS = 500          # 스레드 본문 제한
 DAILY_CAP = 5            # API 한도(250)가 아니라 스팸 판정 방지용 자체 캡
 MIN_GAP_MINUTES = 90     # 발행 간 최소 간격
 # ─────────────────────────────────────────────────────────────────
 
+# 쿠팡: 고지를 본문 끝에 둔다
 TEMPLATES = [
     "{title}\n\n{price_line}가격 확인해보세요 👉 {url}\n\n{disclosure}",
     "{title}\n{price_line}\n{url}\n\n{disclosure}",
     "이거 지금 {price_line}이네요.\n\n{title}\n{url}\n\n{disclosure}",
 ]
+
+# 토스: 고지를 반드시 맨 앞에 둔다. 순서를 바꾸지 말 것.
+TOSS_TEMPLATES = [
+    "{disclosure}\n\n{title}\n\n{price_line}가격 확인해보세요 👉 {url}",
+    "{disclosure}\n\n{title}\n{price_line}\n{url}",
+]
+
+TEMPLATES_BY_PLATFORM = {
+    "coupang": TEMPLATES,
+    "toss": TOSS_TEMPLATES,
+}
 
 
 # ---------------------------------------------------------------- 토큰
@@ -85,25 +108,42 @@ def refresh_token():
 
 # ---------------------------------------------------------------- 문구 생성
 
-def build_text(title, price, url):
+def build_text(title, price, url, platform="coupang"):
+    """플랫폼에 맞는 고지 문구와 배치로 본문을 만든다.
+
+    쿠팡은 본문 끝, 토스는 반드시 맨 앞에 고지가 와야 한다.
+    두 문구를 섞어 쓰면 양쪽 정책을 다 어긴다.
+    """
+    disclosure = DISCLOSURES.get(platform)
+    templates = TEMPLATES_BY_PLATFORM.get(platform)
+    if disclosure is None or templates is None:
+        raise ValueError(f"알 수 없는 플랫폼: {platform!r} — 고지 문구를 정할 수 없어 중단합니다")
+
     price_line = f"{price:,}원 " if price else ""
-    body = random.choice(TEMPLATES).format(
-        title=title.strip(), price_line=price_line,
-        url=url.strip(), disclosure=DISCLOSURE,
-    )
+    tpl = random.choice(templates)
+    body = tpl.format(title=title.strip(), price_line=price_line,
+                      url=url.strip(), disclosure=disclosure)
     body = re.sub(r"\n{3,}", "\n\n", body).strip()
 
     # 500자 초과 시 제목 쪽을 줄인다. 고지 문구는 절대 자르지 않는다.
     if len(body) > MAX_CHARS:
         over = len(body) - MAX_CHARS + 1
         title = title[: max(10, len(title) - over)] + "…"
-        body = random.choice(TEMPLATES).format(
-            title=title, price_line=price_line,
-            url=url.strip(), disclosure=DISCLOSURE,
-        )
-        body = re.sub(r"\n{3,}", "\n\n", body).strip()[:MAX_CHARS]
+        body = tpl.format(title=title, price_line=price_line,
+                          url=url.strip(), disclosure=disclosure)
+        body = re.sub(r"\n{3,}", "\n\n", body).strip()
+        # 잘라낼 때도 고지가 살아남아야 한다.
+        # 토스는 고지가 맨 앞이라 뒤에서 자르고, 쿠팡은 맨 뒤라 앞에서 자른다.
+        if len(body) > MAX_CHARS:
+            body = body[:MAX_CHARS] if platform == "toss" else body[-MAX_CHARS:]
 
-    assert DISCLOSURE in body, "고지 문구가 누락됨 — 발행 중단"
+    assert disclosure in body, f"[{platform}] 고지 문구가 누락됨 — 발행 중단"
+    # 다른 플랫폼의 고지가 섞이면 양쪽 다 위반이다.
+    for other, text in DISCLOSURES.items():
+        if other != platform:
+            assert text not in body, f"[{platform}] 다른 플랫폼({other}) 고지가 섞임 — 발행 중단"
+    if platform == "toss":
+        assert body.startswith(disclosure), "토스 고지는 첫 부분에 와야 함 — 발행 중단"
     return body
 
 
@@ -149,21 +189,23 @@ def posted_today(conn):
 
 # ---------------------------------------------------------------- 메인
 
-def load_ready_rows():
-    if not os.path.exists(CSV_PATH):
-        sys.exit(f"{CSV_PATH} 가 없습니다. 먼저 kakao_deal_extract.py 를 실행하세요.")
-    rows = []
-    with open(CSV_PATH, encoding="utf-8-sig") as f:
-        for r in csv.DictReader(f):
-            aff = (r.get("affiliate_url(직접 채우세요)") or "").strip()
-            if aff.startswith("http"):
-                rows.append({
-                    "product_id": r["product_id"],
-                    "title": r["title"],
-                    "price": int(r["price"]) if r["price"] else None,
-                    "affiliate_url": aff,
-                })
-    return rows
+def load_ready_rows(conn):
+    """발행 대상을 deals.db 에서 읽는다.
+
+    예전에는 pending.csv 를 읽었는데, 그 CSV 의 affiliate_url 열은
+    kakao_deal_extract.py 가 매 주기 새로 쓰면서 비워졌다. 반면 링크는
+    partners_link.py 가 DB 에만 넣는다. 그래서 실제로는 발행 대상이
+    영원히 0건이었고, 종료코드 0 으로 조용히 끝나 알림도 안 갔다.
+    CLAUDE.md 가 "모든 상태는 deals.db 에 저장한다" 고 못 박은 이유다.
+    """
+    rows = conn.execute(
+        "SELECT platform, product_id, title, price, affiliate_url FROM deals "
+        "WHERE affiliate_url IS NOT NULL AND affiliate_url != '' "
+        "AND posted_at IS NULL ORDER BY found_at DESC"
+    ).fetchall()
+    return [{"platform": r[0], "product_id": r[1], "title": r[2],
+             "price": r[3], "affiliate_url": r[4]}
+            for r in rows if str(r[4]).startswith("http")]
 
 
 def main():
@@ -177,12 +219,23 @@ def main():
         refresh_token()
         return
 
-    rows = load_ready_rows()
+    conn = sqlite3.connect(DB_PATH)
+    rows = load_ready_rows(conn)
     if not rows:
-        print("affiliate_url 이 채워진 항목이 없습니다.")
+        # 무인 운영에서 조용한 0건은 조용한 정지와 구분이 안 된다.
+        # 왜 0건인지 알 수 있게 상태를 함께 찍는다.
+        total, linked, posted = conn.execute(
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN affiliate_url IS NOT NULL AND affiliate_url != '' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN posted_at IS NOT NULL THEN 1 ELSE 0 END) FROM deals"
+        ).fetchone()
+        print(f"발행 대상이 없습니다. (deals 총 {total or 0}건 / "
+              f"링크 생성됨 {linked or 0} / 발행됨 {posted or 0})")
+        if (total or 0) > 0 and (linked or 0) == 0:
+            print("→ 링크가 하나도 생성되지 않았습니다. partners_link.py 를 확인하세요.")
+        conn.close()
         return
 
-    conn = sqlite3.connect(DB_PATH)
     already = posted_today(conn)
     remaining = max(0, args.cap - already)
     print(f"오늘 발행 {already}건 / 캡 {args.cap}건 → 남은 슬롯 {remaining}건\n")
@@ -190,7 +243,8 @@ def main():
     if args.dry_run:
         for r in rows[: args.cap]:
             print("─" * 50)
-            print(build_text(r["title"], r["price"], r["affiliate_url"]))
+            print(f"[{r['platform']}:{r['product_id']}]")
+            print(build_text(r["title"], r["price"], r["affiliate_url"], r["platform"]))
         print("─" * 50)
         conn.close()
         return
@@ -205,25 +259,32 @@ def main():
     print(f"Threads API 사용량 {used}/{total}\n")
 
     for r in rows[:remaining]:
-        done = conn.execute("SELECT posted_at FROM deals WHERE product_id=?",
-                            (r["product_id"],)).fetchone()
+        done = conn.execute(
+            "SELECT posted_at FROM deals WHERE platform=? AND product_id=?",
+            (r["platform"], r["product_id"])).fetchone()
         if done and done[0]:
             continue
 
-        text = build_text(r["title"], r["price"], r["affiliate_url"])
+        try:
+            text = build_text(r["title"], r["price"], r["affiliate_url"], r["platform"])
+        except (AssertionError, ValueError) as e:
+            # 고지 문구 문제는 넘어가면 안 되는 사안이다. 건너뛰고 로그에 남긴다.
+            print(f"본문 생성 거부 [{r['platform']}:{r['product_id']}]: {e}")
+            continue
+
         try:
             post_id = publish(uid, tok, text)
         except requests.HTTPError as e:
-            print(f"발행 실패 [{r['product_id']}]: {e.response.text[:300]}")
+            print(f"발행 실패 [{r['platform']}:{r['product_id']}]: {e.response.text[:300]}")
             continue
 
         conn.execute(
-            "UPDATE deals SET affiliate_url=?, posted_at=? WHERE product_id=?",
-            (r["affiliate_url"], datetime.now().isoformat(timespec="seconds"),
-             r["product_id"]),
+            "UPDATE deals SET posted_at=? WHERE platform=? AND product_id=?",
+            (datetime.now().isoformat(timespec="seconds"),
+             r["platform"], r["product_id"]),
         )
         conn.commit()
-        print(f"발행 완료 {post_id}  [{r['product_id']}] {r['title'][:40]}")
+        print(f"발행 완료 {post_id}  [{r['platform']}:{r['product_id']}] {r['title'][:40]}")
 
         gap = MIN_GAP_MINUTES * 60 + random.randint(-600, 600)
         print(f"  다음 발행까지 {gap // 60}분 대기")
