@@ -33,6 +33,13 @@ observe_toss.py — 토스쇼핑 쉐어링크 대시보드 관측
 
    py tools/observe_toss.py
 
+   특정 메뉴 화면까지 보려면 --nav 를 준다. 여러 번 줄 수 있다.
+
+   py tools/observe_toss.py --nav "상품 조회" --nav "링크"
+
+   ※ '링크 발급' 처럼 상태를 바꾸는 이름은 클릭을 거부한다.
+     관측 중에 원하지 않는 쉐어링크가 생성되면 안 되기 때문이다.
+
 크롬을 못 켜겠으면 --launch 로 별도 브라우저를 띄울 수 있다.
 이때는 그 창에서 한 번 로그인해야 하고, 세션은 pw_toss_profile/ 에 남는다.
 
@@ -45,6 +52,7 @@ observe_toss.py — 토스쇼핑 쉐어링크 대시보드 관측
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -163,6 +171,37 @@ JS_SCAN = """() => {
     bodyText: (document.body ? document.body.innerText : '').slice(0, 3000),
   };
 }"""
+
+
+# 누르면 계정 상태가 바뀔 수 있는 버튼. 관측 중에는 절대 클릭하지 않는다.
+# 대시보드에 '링크 발급' 버튼이 상품마다 깔려 있어서(실측 38개)
+# 실수로 누르면 원하지 않는 쉐어링크가 생성된다.
+FORBIDDEN_CLICK = re.compile(r"발급|생성|만들기|등록|삭제|탈퇴|해지|신청|결제|출금")
+
+
+def nav_to(w, page, label, wait=4000):
+    """내비게이션 메뉴를 눌러 이동한다. 이동 외의 동작은 하지 않는다."""
+    if FORBIDDEN_CLICK.search(label):
+        w(f"⚠️ '{label}' 은 상태를 바꿀 수 있는 이름이라 클릭하지 않습니다.")
+        w("   관측 도구는 화면을 보기만 합니다.")
+        return False
+
+    w(f"'{label}' 클릭해서 이동 시도")
+    before = page.url
+    for attempt in (
+        lambda: page.get_by_role("button", name=label, exact=True).first.click(timeout=4000),
+        lambda: page.get_by_role("link", name=label, exact=True).first.click(timeout=3000),
+        lambda: page.get_by_text(label, exact=True).first.click(timeout=3000),
+    ):
+        try:
+            attempt()
+            page.wait_for_timeout(wait)
+            w(f"  이동 완료: {before} → {page.url}")
+            return True
+        except Exception:
+            continue
+    w(f"  '{label}' 을 찾지 못했습니다.")
+    return False
 
 
 def page_state(url):
@@ -353,6 +392,10 @@ def main():
                     help="기존 크롬 대신 별도 브라우저를 띄운다 (로그인 필요)")
     ap.add_argument("--url", default=TARGET)
     ap.add_argument("--port", type=int, default=9222, help="크롬 디버깅 포트")
+    ap.add_argument("--nav", action="append", default=[],
+                    metavar="메뉴이름",
+                    help="이동해서 추가로 덤프할 메뉴. 여러 번 줄 수 있다. "
+                         "예: --nav '상품 조회'")
     ap.add_argument("--out", default="toss_observe.txt")
     args = ap.parse_args()
 
@@ -393,6 +436,12 @@ def main():
                 ensure_ready(w, page, args.url)
 
             dump(w, page, "쉐어링크 대시보드")
+
+            # 지정한 메뉴로 이동해 추가로 덤프한다.
+            # 상품 검색·링크 생성 UI 가 어느 화면에 있는지 확인하기 위함이다.
+            for label in args.nav:
+                if nav_to(w, page, label):
+                    dump(w, page, f"메뉴: {label}")
 
             os.makedirs(SHOT_DIR, exist_ok=True)
             shot = os.path.join(SHOT_DIR, "toss_sharelink.png")
