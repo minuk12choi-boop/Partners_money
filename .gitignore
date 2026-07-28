@@ -16,7 +16,8 @@ status.json
 shots/
 dump_selectors.txt
 kakao_observe.txt
-toss_observe.txt
+toss_observe*.txt
+toss_cards_observe.txt
 
 # ── 파이썬 ───────────────────────────────────────
 __pycache__/

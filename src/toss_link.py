@@ -69,19 +69,35 @@ def log(msg):
 
 # 상품 카드를 훑는다. 카드 구조를 하드코딩하지 않고 '링크 발급' 버튼을
 # 기준으로 거슬러 올라가 그 카드의 텍스트를 모은다.
+#
+# 카드 경계 정의 — 실측으로 확정 (tools/observe_toss_cards.py, 2026-07-29)
+#
+# 예전 규칙은 "innerText 길이가 30 을 넘는 첫 조상" 이었는데, 그러면
+# up=2 에서 멈춰 '68% 특가' 배지를 놓친다(배지는 up=3 에서 들어온다).
+# 실제로 salePct 가 118/118 전부 None 이었다.
+#
+# 대신 **'링크 발급' 을 정확히 1개만 품는 가장 바깥 조상**을 카드로 본다.
+# 스스로 검증되는 규칙이다. 하나라도 더 품는 순간 옆 카드가 섞이므로
+# 남의 특가율·가격을 읽을 수 없다. 실측 프로파일:
+#
+#   up1 특가0 발급1 / up2 특가0 발급1 / up3 특가1 발급1 /
+#   up4 특가1 발급1 / up5 특가118 발급118   ← 여기서 격자 전체로 터진다
+#
+# 경계가 up4 와 up5 사이에서 뚜렷하게 갈리므로 모호함이 없다.
 JS_SCAN_CARDS = """(btnText) => {
   const cards = [];
   const btns = Array.from(document.querySelectorAll('button, [role=button]'))
     .filter(el => (el.innerText || '').trim() === btnText);
 
   btns.forEach((btn, idx) => {
-    // 버튼에서 위로 올라가며 상품명이 들어갈 만큼 큰 조상을 찾는다
+    // '링크 발급' 을 정확히 1개 품는 가장 바깥 조상까지 올라간다
     let node = btn, card = null;
-    for (let i = 0; i < 8 && node; i++) {
+    for (let i = 0; i < 10; i++) {
       node = node.parentElement;
       if (!node) break;
-      const txt = (node.innerText || '').trim();
-      if (txt.length > 30) { card = node; break; }
+      const n = ((node.innerText || '').match(/링크 발급/g) || []).length;
+      if (n !== 1) break;
+      card = node;
     }
     if (!card) return;
 
@@ -102,6 +118,10 @@ JS_SCAN_CARDS = """(btnText) => {
     for (const L of lines) {
       if (/^\\d+% 특가$/.test(L)) continue;
       if (/^개당 [\\d,]+원 수익$/.test(L)) continue;
+      // 단위당 단가 줄. '100ml당 172원', '100g당 1,340원', '1개당 685원'.
+      // 가격 정규식에는 안 걸리지만 제목 후보로 남아 있으면
+      // 제목이 아주 짧은 상품에서 제목 자리를 뺏을 수 있다.
+      if (/^[\\d,.]+\\s*[A-Za-z가-힣]*당 [\\d,]+원$/.test(L)) continue;
       if (/^[\\d,]+원$/.test(L)) {
         if (price === null) price = parseInt(L.replace(/[,원]/g, ''), 10);
         continue;
@@ -284,19 +304,54 @@ def save_deal(conn, product_id, card, sharelink):
 
 # ---------------------------------------------------------------- 선별
 
-def pick(cards, conn, limit):
+def known_titles(conn):
+    """이미 DB 에 있는 토스 상품의 제목 집합.
+
+    상품 ID 로 거르는 게 정확하지만, 카드에는 상품 ID 가 없다(실측).
+    ID 는 링크를 발급해 따라가 봐야만 알 수 있어서, 그때는 이미 한 건을
+    써 버린 뒤다. 그래서 제목으로 먼저 거른다.
+
+    제목이 우연히 겹치면 그 건을 건너뛸 뿐 잘못된 링크를 만들지는
+    않으므로 안전한 방향의 오차다. 최종 중복 판정은 발급 후
+    `already_known()` 이 상품 ID 로 다시 한다.
+    """
+    if conn is None:
+        return set()
+    return {r[0] for r in conn.execute(
+        "SELECT title FROM deals WHERE platform='toss' AND title IS NOT NULL")}
+
+
+def pick(cards, conn, limit, max_price=None):
     """발급할 상품을 고른다.
 
-    30일 최저가 표시가 있는 것을 우선한다. 그다음 개당 수익이 큰 순.
-    이미 DB 에 있는 상품은 건너뛴다.
+    ⚠️ `개당 수익` 으로 정렬하지 않는다. 실측 결과 수수료는 가격의
+    정확히 10% 다(118건 전부 9.99~10.00%). 즉 개당 수익 순 정렬은
+    **가격 순 정렬과 같은 것**이라 아무 정보도 주지 않고, 실제로
+    118만원 정수기·67만원 냉장고만 골라내고 있었다. 딜방 성격(중앙값
+    24,800원)과도 맞지 않고 고가 가전은 전환도 거의 없다.
+
+    대신 '얼마나 싸게 사는가' 로 고른다.
+      1. 30일 최저가 표시가 있는 것 우선
+      2. 특가율(%) 높은 순
+      3. 리뷰 수 많은 순 — 같은 특가율이면 검증된 상품으로
+
+    ※ 이 순서는 잠정값이다. 무엇을 올릴지는 사업 판단이라
+      소유자 확인이 필요하다. TASKS.md T3-b 참고.
     """
+    seen = known_titles(conn)
     fresh = []
     for c in cards:
         if not c["title"]:
             continue
+        if c["title"] in seen:
+            continue
+        if max_price is not None and (c.get("price") or 0) > max_price:
+            continue
         fresh.append(c)
 
-    fresh.sort(key=lambda c: (not c.get("lowest30"), -(c.get("reward") or 0)))
+    fresh.sort(key=lambda c: (not c.get("lowest30"),
+                              -(c.get("salePct") or 0),
+                              -(c.get("reviews") or 0)))
     return fresh[:limit]
 
 
@@ -318,7 +373,7 @@ def do_login():
         ctx.close()
 
 
-def do_run(limit, dry_run):
+def do_run(limit, dry_run, max_price=None):
     conn = sqlite3.connect(DB_PATH)
     ensure_schema(conn)
     os.makedirs(SHOT_DIR, exist_ok=True)
@@ -341,12 +396,14 @@ def do_run(limit, dry_run):
             ctx.close(); conn.close()
             return 0, 0
 
-        targets = pick(cards, conn, limit)
+        targets = pick(cards, conn, limit, max_price)
         log(f"발급 대상 {len(targets)}개")
         for c in targets:
-            log(f"  · {c['title'][:45]}  {c.get('price')}원 "
-                f"{c.get('salePct')}% 개당{c.get('reward')}원 "
-                f"{'[30일최저]' if c.get('lowest30') else ''}")
+            price = f"{c['price']:,}원" if c.get("price") else "가격?"
+            log(f"  · {c['title'][:45]}  {price}")
+            log(f"      특가 {c.get('salePct')}% · 평점 {c.get('rating')} "
+                f"({c.get('reviews')})"
+                f"{' · 30일최저' if c.get('lowest30') else ''}")
 
         if dry_run:
             log("dry-run: 발급하지 않고 종료합니다.")
@@ -395,6 +452,8 @@ def main():
                     help=f"한 번에 발급할 최대 개수 (기본 {MAX_LINKS_PER_RUN})")
     ap.add_argument("--dry-run", action="store_true",
                     help="발급하지 않고 대상 목록만 출력")
+    ap.add_argument("--max-price", type=int, default=None,
+                    help="이 가격을 넘는 상품은 고르지 않는다 (원). 기본: 제한 없음")
     args = ap.parse_args()
 
     if args.login:
@@ -404,7 +463,7 @@ def main():
     limit = min(args.limit, MAX_LINKS_PER_RUN)
     if limit < args.limit:
         log(f"--limit 을 {MAX_LINKS_PER_RUN} 로 낮춥니다 (접근 빈도 제한)")
-    do_run(limit, args.dry_run)
+    do_run(limit, args.dry_run, args.max_price)
 
 
 if __name__ == "__main__":
