@@ -15,9 +15,12 @@ run.log
 status.json
 shots/
 dump_selectors.txt
-kakao_observe.txt
-toss_observe*.txt
-toss_cards_observe.txt
+
+# 관측 도구의 출력. 계정 정보·발급된 링크가 섞이므로 커밋하지 않는다.
+# 도구를 새로 만들 때마다 여기에 한 줄씩 추가하는 걸 잊어서
+# 실제로 한 번 커밋된 적이 있다(coupang_issue_observe.txt). 통짜로 막는다.
+*_observe.txt
+coupang_state.json
 
 # ── 파이썬 ───────────────────────────────────────
 __pycache__/
@@ -31,7 +34,3 @@ venv/
 .vscode/
 .idea/
 .DS_Store
-toss_issue_observe.txt
-coupang_observe.txt
-coupang_state.json
-coupang_session_observe.txt
