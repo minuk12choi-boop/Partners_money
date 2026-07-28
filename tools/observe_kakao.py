@@ -163,6 +163,76 @@ def list_windows(backend):
         return Desktop(backend=backend).windows()
 
 
+# ---------------------------------------------------------------- 컨트롤 트리
+
+def dump_tree(w, backend, handle, wrapper, depth):
+    """컨트롤 트리를 덤프한다.
+
+    print_control_identifiers() 는 WindowSpecification 의 메서드다.
+    Desktop().windows() 와 wrapper_object() 가 돌려주는 래퍼
+    (DialogWrapper / HwndWrapper 등) 에는 그 메서드가 없다 — 실측으로 확인.
+    그래서 핸들로 WindowSpecification 을 다시 만들어 호출한다.
+    그래도 실패하면 자식 창을 직접 순회하는 방식으로 대체한다."""
+    if handle is not None:
+        try:
+            spec = Desktop(backend=backend).window(handle=handle)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                spec.print_control_identifiers(depth=depth)
+            text = buf.getvalue().strip()
+            if text:
+                for line in text.splitlines():
+                    w("    " + line)
+                return
+            w("    (print_control_identifiers 출력이 비어 있음 → 직접 순회)")
+        except Exception as e:
+            w(f"    (print_control_identifiers 실패: {e} → 직접 순회로 대체)")
+
+    if wrapper is None:
+        w("    덤프할 수 없습니다.")
+        return
+    _walk(w, wrapper, depth, 1)
+
+
+def _walk(w, node, depth, level):
+    """자식 컨트롤을 재귀적으로 훑는다. 어떤 pywinauto 버전에서도 동작한다."""
+    if level > depth:
+        return
+    try:
+        children = node.children()
+    except Exception as e:
+        w("    " + "  " * level + f"(자식 조회 실패: {e})")
+        return
+    for ch in children:
+        cls = txt = cid = rect = "?"
+        try:
+            cls = ch.class_name()
+        except Exception:
+            pass
+        try:
+            txt = ch.window_text()
+        except Exception:
+            pass
+        try:
+            cid = ch.control_id()
+        except Exception:
+            pass
+        try:
+            rect = str(ch.rectangle())
+        except Exception:
+            pass
+        w("    " + "  " * level + f"class={cls!r} text={txt!r} id={cid} {rect}")
+        _walk(w, ch, depth, level + 1)
+
+
+def spec_and_wrapper(backend, handle):
+    """핸들로 래퍼를 얻는다. 실패하면 None."""
+    try:
+        return Desktop(backend=backend).window(handle=handle).wrapper_object()
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------- mode: windows
 
 def mode_windows(w, room, show_all):
@@ -260,15 +330,7 @@ def mode_tree(w, room, depth):
 
             w("")
             w(f"  ▼ {info['cls']!r} / {title!r}")
-            buf = io.StringIO()
-            try:
-                with contextlib.redirect_stdout(buf):
-                    win.print_control_identifiers(depth=depth)
-            except Exception as e:
-                w(f"    트리 덤프 실패: {e}")
-                continue
-            for line in buf.getvalue().splitlines():
-                w("    " + line)
+            dump_tree(w, backend, info["handle"], win, depth)
 
 
 # ---------------------------------------------------------------- mode: dialog
@@ -303,7 +365,9 @@ def mode_dialog(w, wait, depth):
     w("  지금부터 직접 하세요:")
     w("    1. 카카오톡 딜방 창을 클릭해 포커스를 준다")
     w("    2. Ctrl+S 를 누른다")
-    w("    3. 대화상자가 뜨면 '그대로 두고' 기다린다 (저장하지 말 것)")
+    w("    3. 관측 목적에 따라 —")
+    w("       · 저장 대화상자 구조를 볼 때  : 그대로 두고 기다린다")
+    w("       · 덮어쓰기 확인창을 볼 때     : 이미 있는 파일명으로 저장까지 진행한다")
     w(f"    4. {wait}초 동안 관찰합니다")
     w("*" * 78)
     w("")
@@ -351,17 +415,13 @@ def mode_dialog(w, wait, depth):
     w("-" * 78)
     w("남아 있는 대화상자의 컨트롤 트리 (버튼 이름·입력 필드 확인용):")
     for h, info in seen.items():
+        # 툴팁·드롭다운 같은 부속 창은 볼 게 없어 건너뛴다.
+        # 실측상 Ctrl+S 한 번에 17개가 뜨는데 대부분 이런 것들이다.
+        if info["cls"] in ("tooltips_class32", "Auto-Suggest Dropdown"):
+            continue
         w("")
         w(f"  ▼ {info['cls']!r} / {info['title']!r}")
-        try:
-            win = Desktop(backend="win32").window(handle=h).wrapper_object()
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                win.print_control_identifiers(depth=depth)
-            for line in buf.getvalue().splitlines():
-                w("    " + line)
-        except Exception as e:
-            w(f"    트리 덤프 실패: {e}")
+        dump_tree(w, "win32", h, spec_and_wrapper("win32", h), depth)
 
 
 # ---------------------------------------------------------------- mode: encoding
@@ -439,8 +499,8 @@ def main():
     ap.add_argument("--all", action="store_true",
                     help="windows 모드에서 카카오 외 프로세스 창도 전부 출력")
     ap.add_argument("--depth", type=int, default=4, help="컨트롤 트리 깊이")
-    ap.add_argument("--wait", type=int, default=25,
-                    help="dialog 모드 관찰 시간(초)")
+    ap.add_argument("--wait", type=int, default=40,
+                    help="dialog 모드 관찰 시간(초). 저장까지 진행할 때는 넉넉히 준다")
     ap.add_argument("--file", default="export.txt",
                     help="encoding 모드에서 검사할 txt 경로")
     args = ap.parse_args()

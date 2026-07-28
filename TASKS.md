@@ -80,9 +80,39 @@ for w in Desktop(backend="win32").windows():
 > 같은 보이지 않는 문자는 없다. 따라서 `--room "쿠팡 실시간 핫딜방"` 이 안전하다.
 > 이모지를 포함시키면 콘솔 인코딩 문제가 생길 수 있으니 넣지 말 것.
 
+**관측:** (2026-07-28, `tools/observe_kakao.py --mode dialog`)
+
+> **Ctrl+S → 저장 대화상자 직행. 중간 옵션 대화상자는 없다.**
+>
+> 딜방 창에서 Ctrl+S 를 누르면 곧바로 아래가 뜬다.
+>
+> ```
+> class='#32770'  title='다른 이름으로 저장'  proc=KakaoTalk.exe
+> ```
+>
+> 제목 코드포인트는 평범한 한글이고 숨은 문자가 없다.
+> 예상 실패 지점 3번("카톡이 저장 전에 옵션 대화상자를 한 번 더 띄운다")은
+> **사실이 아니었다.** `kakao_export.py` 의 Ctrl+S 전제는 맞다.
+>
+> 대화상자가 KakaoTalk.exe 소유라는 점도 확인했다. 다른 앱의 저장
+> 대화상자를 잘못 잡지 않도록 소유 프로세스로 걸러도 된다.
+>
+> **부속 창 주의**: Ctrl+S 한 번에 창이 17개 뜬다. 그중 실제 대화상자는
+> `#32770` 하나뿐이고 나머지는 `tooltips_class32`, `Auto-Suggest Dropdown`,
+> `ComboLBox`, `_SearchEditBoxFakeWindow`, `WorkerW` 같은 부속 창이다.
+> 전부 제목이 비어 있어 제목으로 거르면 걸러진다.
+>
+> **관측 도구 자체의 버그를 여기서 발견했다.**
+> `print_control_identifiers()` 는 `WindowSpecification` 의 메서드인데
+> `Desktop().windows()` 와 `wrapper_object()` 는 래퍼(`DialogWrapper` 등)를
+> 돌려준다. 래퍼에는 그 메서드가 없어 트리 덤프가 전부 실패했다.
+> 핸들로 `WindowSpecification` 을 다시 만들도록 고쳤고, 실패 시 자식 창을
+> 직접 순회하는 대체 경로를 넣었다. `--mode tree` 도 같은 원인으로 실패한다.
+
 **미관측 (남은 것):**
+- 저장 대화상자의 파일명 입력 필드와 버튼 이름 (도구 버그로 못 얻음 → 재실행 필요)
+- 덮어쓰기 확인 대화상자의 제목·클래스·버튼 (예상 실패 지점 4)
 - 메인 창의 컨트롤 트리 — `Ctrl+F` 검색 흐름 (예상 실패 지점 2)
-- Ctrl+S 후 대화상자 구조 (예상 실패 지점 3, 4)
 
 ---
 
