@@ -50,6 +50,11 @@ PRODUCTS_URL = "https://sharelink.toss.im/links/recommended-products"
 RE_SHARELINK = re.compile(r"https?://toss\.im/_m/[A-Za-z0-9]+")
 RE_TOSS_PRODUCT_ID = re.compile(r"toss\.shopping/t/(\d+)")
 
+# 링크를 만드는 API. 실측으로 확인한 경로다.
+#   POST https://sharelink.toss.im/api-public/v3/shopping/sharelink/link/issue
+# 버전(v3)이 바뀔 수 있어 앞뒤를 뺀 부분만으로 매칭한다.
+LINK_ISSUE_PATH = "/sharelink/link/issue"
+
 # ── 접근 빈도 제한 ────────────────────────────────────────────────
 # 쿠팡(partners_link.py)과 같은 보수적인 값을 쓴다.
 # 토스 운영정책도 "사용자의 의도에 반하는 방식" 을 금지한다.
@@ -147,17 +152,10 @@ JS_SCAN_CARDS = """(btnText) => {
   return cards;
 }"""
 
-# 페이지 전역에서 발급된 링크를 긁는다.
-# input 의 value 는 outerHTML 에 안 나오므로 JS 로 읽어야 한다.
-# (partners_link.py 의 JS_HARVEST 와 같은 이유. 건드리지 말 것.)
-JS_HARVEST = """() => {
-  const found = [];
-  document.querySelectorAll('input, textarea').forEach(el => {
-    if (el.value) found.push(el.value);
-  });
-  found.push(document.body ? document.body.innerText : '');
-  return found.join('\\n');
-}"""
+# 예전에는 여기 JS_HARVEST 가 있었다. 페이지에서 발급된 링크를 긁는
+# 용도였는데, 실측 결과 **링크가 DOM 에 아예 나타나지 않아** 쓸모가 없었다.
+# partners_link.py(쿠팡)에는 여전히 필요하다. 쿠팡은 결과를 input 에 담아
+# 보여주기 때문이다. 두 사이트의 동작이 다르므로 같이 지우지 말 것.
 
 
 # ---------------------------------------------------------------- 브라우저
@@ -165,11 +163,19 @@ JS_HARVEST = """() => {
 def open_context(pw):
     os.makedirs(PROFILE_DIR, exist_ok=True)
     # CLAUDE.md 제약 5: headless 금지
-    return pw.chromium.launch_persistent_context(
+    ctx = pw.chromium.launch_persistent_context(
         PROFILE_DIR, headless=False,
         viewport={"width": 1440, "height": 900}, locale="ko-KR",
         args=["--disable-blink-features=AutomationControlled"],
     )
+    # 발급 API 응답을 놓쳤을 때 클립보드에서 링크를 건지기 위한 권한.
+    # 토스는 발급과 동시에 링크를 클립보드에 넣는다(실측).
+    try:
+        ctx.grant_permissions(["clipboard-read", "clipboard-write"],
+                              origin="https://sharelink.toss.im")
+    except Exception as e:
+        log(f"클립보드 권한 부여 실패(대비책만 못 씁니다): {e}")
+    return ctx
 
 
 def load_cache():
@@ -211,32 +217,98 @@ def scan_cards(page):
 
 
 def issue_link(page, idx, wait=20):
-    """idx 번째 '링크 발급' 버튼을 눌러 내 쉐어링크를 얻는다."""
-    before = set(RE_SHARELINK.findall(page.evaluate(JS_HARVEST)))
+    """idx 번째 '링크 발급' 버튼을 눌러 (쉐어링크, 상품ID) 를 얻는다.
 
+    ⚠️ 화면에서 링크를 읽지 않는다. 실측 결과(tools/observe_toss_issue.py,
+    2026-07-29) **발급된 링크는 DOM 에 전혀 나타나지 않는다.**
+    '링크를 복사했어요.' 토스트만 뜨고 링크는 클립보드로 간다.
+    예전의 JS_HARVEST 방식은 원리적으로 성공할 수 없었다.
+
+    대신 발급 API 의 응답을 가로챈다. 실측한 응답:
+
+        POST .../shopping/sharelink/link/issue
+        {"resultType":"SUCCESS","success":{
+           "shortUrl":"https://toss.im/_m/vloN92Cn",
+           "originUrl":"https://toss.shopping/t/599038939?k=...&referrer=affiliate",
+           "affTrackKey":null}}
+
+    `originUrl` 에 상품 ID 가 들어 있어서 내 링크를 새 탭으로 따라가
+    확인하던 단계(resolve_product_id)가 통째로 없어졌다. 접근 횟수가
+    줄고 실패 지점도 하나 사라진다.
+
+    ※ 이건 링크를 손으로 조립하는 게 아니다(CLAUDE.md 제약 4).
+      토스 UI 의 발급 버튼을 그대로 누르고, 토스 시스템이 돌려준
+      링크를 읽을 뿐이다.
+    """
+    got = {}
+
+    def on_response(resp):
+        if LINK_ISSUE_PATH not in resp.url:
+            return
+        try:
+            data = resp.json()
+        except Exception as e:
+            log(f"  발급 응답 파싱 실패: {e}")
+            return
+        s = (data or {}).get("success") or {}
+        short = s.get("shortUrl")
+        origin = s.get("originUrl") or ""
+        if not short:
+            log(f"  발급 응답에 shortUrl 이 없음: {str(data)[:200]}")
+            return
+        m = RE_TOSS_PRODUCT_ID.search(origin)
+        got["link"] = short
+        got["pid"] = m.group(1) if m else None
+        if not got["pid"]:
+            log(f"  발급 응답의 originUrl 에서 상품ID 를 못 찾음: {origin[:120]}")
+
+    page.on("response", on_response)
     try:
-        btn = page.get_by_role("button", name=BTN_ISSUE, exact=True).nth(idx)
-        btn.scroll_into_view_if_needed(timeout=5000)
-        btn.click(timeout=6000)
-    except Exception as e:
-        log(f"  버튼 클릭 실패: {e}")
-        return None
+        try:
+            btn = page.get_by_role("button", name=BTN_ISSUE, exact=True).nth(idx)
+            btn.scroll_into_view_if_needed(timeout=5000)
+            btn.click(timeout=6000)
+        except Exception as e:
+            log(f"  버튼 클릭 실패: {e}")
+            return None, None
 
-    deadline = time.time() + wait
-    while time.time() < deadline:
-        txt = page.evaluate(JS_HARVEST)
-        hits = [h for h in RE_SHARELINK.findall(txt) if h not in before]
-        if hits:
-            return max(hits, key=len)
-        page.wait_for_timeout(800)
-    return None
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            if got.get("link"):
+                return got["link"], got.get("pid")
+            page.wait_for_timeout(400)
+    finally:
+        try:
+            page.remove_listener("response", on_response)
+        except Exception:
+            pass
+
+    # 응답을 놓쳤을 때의 대비책. 토스는 발급과 동시에 클립보드에
+    # '고지문구 + 상품명 + 링크' 를 넣는다(실측). 여기엔 상품 ID 가
+    # 없으므로 링크만 건지고 상품 ID 는 따로 확인해야 한다.
+    link = read_clipboard_link(page)
+    if link:
+        log("  ! 발급 API 응답을 놓쳐 클립보드에서 링크를 건졌습니다.")
+        return link, None
+    return None, None
+
+
+def read_clipboard_link(page):
+    """클립보드에서 쉐어링크를 읽는다. 대비책 경로."""
+    try:
+        text = page.evaluate("() => navigator.clipboard.readText()")
+    except Exception as e:
+        log(f"  클립보드 읽기 실패: {e}")
+        return None
+    m = RE_SHARELINK.search(text or "")
+    return m.group(0) if m else None
 
 
 def resolve_product_id(page, sharelink):
-    """발급된 내 링크를 따라가 상품 ID 를 얻는다.
+    """내 링크를 따라가 상품 ID 를 얻는다. 대비책 경로.
 
-    카드에는 상품 ID 가 드러나지 않는다. 내 링크를 한 번 열어보면
-    toss.shopping/t/<id> 로 이어지므로 거기서 얻는다.
+    평소에는 발급 API 응답의 originUrl 에서 바로 얻으므로 쓰이지 않는다.
+    응답을 놓쳐 클립보드로 링크만 건졌을 때만 여기까지 온다.
     새 탭에서 열고 바로 닫아 대시보드 상태를 건드리지 않는다.
     """
     tab = None
@@ -411,7 +483,7 @@ def do_run(limit, dry_run, max_price=None):
             return 0, 0
 
         for c in targets:
-            link = issue_link(page, c["idx"])
+            link, pid = issue_link(page, c["idx"])
             if not link:
                 page.screenshot(path=os.path.join(SHOT_DIR, f"toss_err_{c['idx']}.png"))
                 log(f"  - 발급 실패: {c['title'][:35]} → shots/toss_err_{c['idx']}.png")
@@ -419,15 +491,22 @@ def do_run(limit, dry_run, max_price=None):
                 time.sleep(SLEEP_BETWEEN)
                 continue
 
-            pid = resolve_product_id(page, link)
+            # 평소에는 발급 응답에서 이미 상품ID 가 나온다.
+            # 여기까지 오는 건 클립보드 대비책으로 링크만 건진 경우다.
             if not pid:
-                log(f"  ! 상품ID 미확인이라 저장하지 않음: {link}")
+                pid = resolve_product_id(page, link)
+
+            if not pid:
+                # 링크는 이미 발급됐다. 조용히 버리면 발급만 하고
+                # 기록이 없는 상태가 되므로 반드시 남긴다.
+                log(f"  ! 상품ID 미확인. 발급된 링크를 잃지 않도록 기록해 둡니다: {link}")
+                log(f"    상품명: {c['title']}")
                 fail += 1
                 time.sleep(SLEEP_BETWEEN)
                 continue
 
             if already_known(conn, pid):
-                log(f"  = 이미 있는 상품: [{pid}] {c['title'][:35]}")
+                log(f"  = 이미 있는 상품이라 저장하지 않음: [{pid}] {c['title'][:35]}")
                 skip += 1
                 time.sleep(SLEEP_BETWEEN)
                 continue
