@@ -251,18 +251,111 @@ def get_link(page, product_url, cache):
     return link
 
 
+def is_logged_in(page):
+    """로그인 상태인지 본다.
+
+    로그아웃 상태의 파트너스 첫 화면에는 '로그인' 과 '회원가입' 이 있고,
+    로그인하면 '마이 페이지' 와 '링크 생성' 이 나온다. 이 차이로 가른다.
+    URL 만 보면 안 된다. 해시 라우트라 로그아웃 상태에서도 같은 주소에
+    머무를 수 있다.
+    """
+    if "login.coupang.com" in page.url:
+        return False
+    try:
+        txt = page.evaluate("() => document.body.innerText") or ""
+    except Exception:
+        return False
+    if "회원가입" in txt and "로그인" in txt and "마이 페이지" not in txt:
+        return False
+    return "링크 생성" in txt or "마이 페이지" in txt
+
+
+def tick_keep_login(page):
+    """로그인 화면의 '자동 로그인' 을 체크한다.
+
+    ⚠️ 이게 안 되면 로그인이 그 브라우저 창에서만 유효하다.
+    실측(2026-07-29): 체크하지 않고 로그인하면 인증 쿠키가 세션 쿠키로
+    발급돼 브라우저를 닫는 순간 사라진다. 프로필에는 추적용 쿠키
+    (PCID, MARKETID, _ga, Akamai bm_*)만 남고 다음 실행은 로그인 화면으로
+    튕긴다. 무인 운영에서는 치명적이다.
+    """
+    try:
+        box = page.locator("#login-keep-state").first
+        box.wait_for(state="attached", timeout=8000)
+        if box.is_checked():
+            log("'자동 로그인' 이 이미 켜져 있습니다.")
+            return True
+        # 체크박스가 커스텀 UI 로 가려져 있으면 일반 클릭이 안 먹는다.
+        try:
+            box.check(timeout=3000)
+        except Exception:
+            box.check(timeout=3000, force=True)
+        ok = box.is_checked()
+        log("'자동 로그인' 을 켰습니다." if ok else "🔴 '자동 로그인' 을 켜지 못했습니다.")
+        return ok
+    except Exception as e:
+        log(f"🔴 '자동 로그인' 체크박스를 찾지 못했습니다: {e}")
+        log("   화면에서 직접 체크하고 로그인하세요. 안 켜면 세션이 안 남습니다.")
+        return False
+
+
 def do_login():
+    os.makedirs(SHOT_DIR, exist_ok=True)
+
     with sync_playwright() as pw:
         ctx = open_context(pw)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
-        page.goto("https://partners.coupang.com/", wait_until="domcontentloaded")
-        print("\n브라우저에서 로그인을 완료한 뒤 여기서 Enter 를 누르세요.")
-        input()
+        # 링크 생성 화면으로 간다. 로그인이 필요하면 알아서 로그인으로 튕긴다.
         goto_link_page(page)
-        os.makedirs(SHOT_DIR, exist_ok=True)
-        page.screenshot(path=os.path.join(SHOT_DIR, "after_login.png"))
-        log(f"세션 저장 완료 → {PROFILE_DIR}")
+
+        if is_logged_in(page):
+            log("이미 로그인돼 있습니다.")
+        else:
+            tick_keep_login(page)
+            print()
+            print("─" * 60)
+            print("브라우저에서 로그인을 완료하세요.")
+            print("'자동 로그인' 은 스크립트가 켜 두었습니다. 끄지 마세요.")
+            print("끄면 브라우저를 닫는 순간 세션이 사라집니다.")
+            print("끝났으면 여기서 Enter 를 누르세요.")
+            print("─" * 60)
+            try:
+                input()
+            except EOFError:
+                log("입력을 받을 수 없습니다. 대화형 콘솔에서 실행하세요.")
+                ctx.close()
+                return False
+
+            goto_link_page(page)
+            page.screenshot(path=os.path.join(SHOT_DIR, "after_login.png"))
+            if not is_logged_in(page):
+                log("🔴 아직 로그인 상태가 아닙니다 → shots/after_login.png")
+                ctx.close()
+                return False
+            log("로그인 확인됨.")
+
         ctx.close()
+
+    # ── 진짜 검증: 브라우저를 껐다 켜서 세션이 살아남는지 본다 ──────
+    # 로그인 직후에는 당연히 로그인 상태다. 문제는 그게 디스크에
+    # 남느냐다. 여기서 확인하지 않으면 다음 주기에 조용히 실패한다.
+    log("세션이 재시작 후에도 남는지 확인합니다...")
+    with sync_playwright() as pw:
+        ctx = open_context(pw)
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        goto_link_page(page)
+        ok = is_logged_in(page)
+        page.screenshot(path=os.path.join(SHOT_DIR, "after_relaunch.png"))
+        ctx.close()
+
+    if ok:
+        log(f"✅ 세션이 재시작 후에도 유지됩니다 → {PROFILE_DIR}")
+    else:
+        log("🔴 재시작하니 로그아웃됐습니다 → shots/after_relaunch.png")
+        log("   '자동 로그인' 을 켜고 다시 로그인해야 합니다.")
+        log("   켜지 않으면 인증 쿠키가 세션 쿠키로 발급돼 브라우저를")
+        log("   닫는 순간 사라집니다(실측).")
+    return ok
 
 
 def do_run(limit):
