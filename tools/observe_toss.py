@@ -15,13 +15,17 @@ observe_toss.py — 토스쇼핑 쉐어링크 대시보드 관측
 ────────────────────────────────────────────────────────────────
 사용법 (소유자 Windows PC 에서)
 
-1) 크롬을 완전히 종료한다. (작업 표시줄 트레이까지 확인)
+1) 크롬을 완전히 종료한다. 크롬이 떠 있는 상태로 플래그를 주면
+   무시되고 기존 프로세스에 창만 하나 더 열린다. 확실하게:
+
+   taskkill /F /IM chrome.exe
 
 2) 디버깅 포트를 열어 크롬을 다시 켠다. 명령 프롬프트에서:
 
    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9222
 
    ※ 기존 로그인이 그대로 유지된다. 새로 로그인할 필요 없다.
+   ※ 확인: 주소창에 http://127.0.0.1:9222/json/version → JSON 이 나오면 성공
 
 3) 그 크롬에서 https://sharelink.toss.im/home 을 연다. (로그인 확인)
 
@@ -39,8 +43,11 @@ observe_toss.py — 토스쇼핑 쉐어링크 대시보드 관측
 """
 
 import argparse
+import json
 import os
 import sys
+import urllib.error
+import urllib.request
 from datetime import datetime
 
 for _s in (sys.stdout, sys.stderr):
@@ -59,7 +66,11 @@ PROFILE_DIR = os.path.join(HERE, "pw_toss_profile")
 SHOT_DIR = os.path.join(HERE, "shots")
 
 TARGET = "https://sharelink.toss.im/home"
-CDP_URL = "http://localhost:9222"
+
+# 크롬 디버깅 포트는 IPv4 127.0.0.1 에만 바인딩된다.
+# 'localhost' 는 윈도우에서 IPv6(::1) 로 먼저 풀려 ECONNREFUSED 가 난다(실측).
+# 그래서 127.0.0.1 을 먼저 시도한다.
+CDP_HOSTS = ["127.0.0.1", "localhost"]
 
 
 # ---------------------------------------------------------------- 출력
@@ -200,10 +211,35 @@ def dump(w, page, label):
 
 # ---------------------------------------------------------------- 접속
 
-def via_cdp(w, pw, url):
+def probe_cdp(w, port):
+    """어느 호스트로 디버깅 포트가 열려 있는지 먼저 확인한다.
+
+    Playwright 에 바로 넘기면 IPv4/IPv6 문제인지 크롬이 안 켜진 건지
+    구분이 안 된다. 표준 라이브러리로 미리 찔러보고 원인을 갈라낸다.
+    """
+    for host in CDP_HOSTS:
+        endpoint = f"http://{host}:{port}"
+        try:
+            with urllib.request.urlopen(f"{endpoint}/json/version", timeout=3) as r:
+                info = json.load(r)
+            w(f"  {host}:{port} 응답함 — {info.get('Browser', '?')}")
+            return endpoint
+        except urllib.error.URLError as e:
+            w(f"  {host}:{port} 실패 ({e.reason})")
+        except Exception as e:
+            w(f"  {host}:{port} 실패 ({e})")
+    return None
+
+
+def via_cdp(w, pw, url, port):
     """이미 열려 있는 크롬에 붙는다. 기존 로그인이 그대로 살아 있다."""
-    w(f"크롬에 연결 시도: {CDP_URL}")
-    browser = pw.chromium.connect_over_cdp(CDP_URL)
+    w(f"디버깅 포트 탐색 (포트 {port})")
+    endpoint = probe_cdp(w, port)
+    if endpoint is None:
+        raise RuntimeError("디버깅 포트가 열려 있지 않습니다")
+
+    w(f"크롬에 연결: {endpoint}")
+    browser = pw.chromium.connect_over_cdp(endpoint)
     ctxs = browser.contexts
     if not ctxs:
         raise RuntimeError("크롬 컨텍스트가 없습니다.")
@@ -255,6 +291,7 @@ def main():
     ap.add_argument("--launch", action="store_true",
                     help="기존 크롬 대신 별도 브라우저를 띄운다 (로그인 필요)")
     ap.add_argument("--url", default=TARGET)
+    ap.add_argument("--port", type=int, default=9222, help="크롬 디버깅 포트")
     ap.add_argument("--out", default="toss_observe.txt")
     args = ap.parse_args()
 
@@ -269,16 +306,25 @@ def main():
                 handle, page = via_launch(w, pw, args.url)
             else:
                 try:
-                    handle, page = via_cdp(w, pw, args.url)
+                    handle, page = via_cdp(w, pw, args.url, args.port)
                 except Exception as e:
                     w("")
                     w(f"크롬 연결 실패: {e}")
                     w("")
-                    w("크롬을 완전히 종료한 뒤 아래로 다시 켜세요:")
-                    w('  "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"'
-                      ' --remote-debugging-port=9222')
+                    w("가장 흔한 원인은 크롬이 이미 떠 있는 상태에서 플래그를 준 것입니다.")
+                    w("크롬이 실행 중이면 새로 준 --remote-debugging-port 는 무시되고")
+                    w("기존 프로세스에 창만 하나 더 열립니다. 트레이 아이콘까지 꺼야 합니다.")
                     w("")
-                    w("또는 --launch 로 별도 브라우저를 쓰세요:")
+                    w("명령 프롬프트에서 순서대로:")
+                    w("  taskkill /F /IM chrome.exe")
+                    w('  "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"'
+                      f' --remote-debugging-port={args.port}')
+                    w("")
+                    w("제대로 켜졌는지 확인하는 법 — 그 크롬 주소창에 아래를 넣어")
+                    w("JSON 이 나오면 성공입니다:")
+                    w(f"  http://127.0.0.1:{args.port}/json/version")
+                    w("")
+                    w("그래도 안 되면 --launch 로 별도 브라우저를 쓰세요 (로그인 1회 필요):")
                     w("  py tools/observe_toss.py --launch")
                     return
 
