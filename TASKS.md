@@ -10,7 +10,7 @@
 
 ## T0. 환경 구축
 
-- [ ] `pip install -r requirements.txt`
+- [x] `pip install -r requirements.txt`
 - [ ] `playwright install chromium`
 - [ ] `.env.example`를 참고해 환경변수 설정
 - [ ] `python -c "import pywinauto, playwright, requests"` 통과
@@ -47,8 +47,42 @@ for w in Desktop(backend="win32").windows():
 - 채팅방 창이 닫혀 있을 때 → 자동으로 열어서 `export.txt` 생성
 - 두 번 연속 실행해도 덮어쓰기 대화상자에서 멈추지 않음
 
-**관측:**
-> (여기에 실제 윈도우 클래스명과 대화상자 구조를 기록)
+**관측:** (2026-07-28, `tools/observe_kakao.py --mode windows`)
+
+> **창 클래스 — 실측**
+>
+> | 창 | class_name | title |
+> |---|---|---|
+> | 채팅방 | `EVA_Window_Dblclk` | `'💖 쿠팡 실시간 핫딜방 💖'` |
+> | 메인 | `EVA_Window_Dblclk` | `'카카오톡'` |
+>
+> **메인 창과 채팅방 창이 같은 클래스다.** 구분은 제목으로만 가능하다.
+> 기존 `CLS_CHAT = "#32770"` 은 틀린 값이었다. `#32770` 은 Win32 표준
+> 대화상자 클래스이며, 카톡 창이 아니라 저장 대화상자가 쓰는 값이다.
+>
+> 다만 기존 조건이 `cls in (CLS_CHAT, CLS_MAIN)` 이라 `CLS_MAIN` 쪽에 걸려
+> 창 찾기 자체는 우연히 동작하고 있었다. 예상 실패 지점 1번은 실제 실패가 아니다.
+> 이름과 의미가 어긋나 오해를 부르므로 `CLS_KAKAO` / `CLS_DIALOG` 로 정리했다.
+>
+> **백엔드**: 두 창 모두 `win32` 와 `uia` 양쪽에서 보인다. `backend="win32"` 유지로 충분.
+>
+> **숨은 창 주의**: `KakaoTalk.exe` 는 제목 없는 `EVA_Window_Dblclk` 와
+> `tooltips_class32` 를 수십 개(실측 43개 중 대부분) 띄워 둔다. 전부
+> `visible=False` 이고 제목이 비어 있다. 제목 필터로 걸러지지만
+> 숨은 창을 잡으면 `set_focus()` 가 조용히 실패하므로 visible 검사를 추가했다.
+>
+> **방 이름 / `--room` 문자열**
+>
+> 제목 코드포인트:
+> `U+1F496(💖) U+0020 U+CFE0(쿠) U+D321(팡) U+0020 U+C2E4(실) U+C2DC(시) U+AC04(간) U+0020 U+D56B(핫) U+B51C(딜) U+BC29(방) U+0020 U+1F496(💖)`
+>
+> 이모지는 U+1F496 이고 **앞뒤로 공백이 하나씩 있다**. U+FE0F(이체자 선택자)
+> 같은 보이지 않는 문자는 없다. 따라서 `--room "쿠팡 실시간 핫딜방"` 이 안전하다.
+> 이모지를 포함시키면 콘솔 인코딩 문제가 생길 수 있으니 넣지 말 것.
+
+**미관측 (남은 것):**
+- 메인 창의 컨트롤 트리 — `Ctrl+F` 검색 흐름 (예상 실패 지점 2)
+- Ctrl+S 후 대화상자 구조 (예상 실패 지점 3, 4)
 
 ---
 

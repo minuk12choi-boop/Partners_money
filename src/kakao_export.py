@@ -28,9 +28,13 @@ from pywinauto.keyboard import send_keys
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_OUT = os.path.join(HERE, "export.txt")
 
-# PC 카카오톡 윈도우 클래스
-CLS_MAIN = "EVA_Window_Dblclk"
-CLS_CHAT = "#32770"
+# PC 카카오톡 윈도우 클래스 — 2026-07-28 실측값 (TASKS.md T1 관측 참고)
+# 메인 창과 채팅방 창이 같은 클래스를 쓴다. 둘의 구분은 제목으로만 가능하다.
+CLS_KAKAO = "EVA_Window_Dblclk"
+# Win32 표준 대화상자 클래스. 카톡 창이 아니라 저장 대화상자가 이걸 쓴다.
+CLS_DIALOG = "#32770"
+# 메인 창의 제목. 이 목록에 걸리면 채팅방 창이 아니다.
+MAIN_TITLES = ("카카오톡", "KakaoTalk")
 
 
 def find_chat_window(room_keyword):
@@ -39,14 +43,19 @@ def find_chat_window(room_keyword):
         try:
             title = w.window_text()
             cls = w.class_name()
+            visible = w.is_visible()
         except Exception:
             continue
-        if not title:
+        if not title or cls != CLS_KAKAO:
             continue
-        if room_keyword in title and cls in (CLS_CHAT, CLS_MAIN):
-            # 메인 창(제목이 '카카오톡')은 제외
-            if title.strip() in ("카카오톡", "KakaoTalk"):
-                continue
+        # 제목이 없는 숨은 EVA_Window_Dblclk 가 수십 개 떠 있다(실측).
+        # 지금은 제목으로 걸러지지만, 숨은 창을 잡으면 set_focus 가 조용히 실패한다.
+        if not visible:
+            continue
+        # 메인 창(제목이 '카카오톡')은 제외
+        if title.strip() in MAIN_TITLES:
+            continue
+        if room_keyword in title:
             return w
     return None
 
@@ -54,7 +63,7 @@ def find_chat_window(room_keyword):
 def open_chat_from_main(room_keyword):
     """메인 창에서 방을 검색해 연다."""
     try:
-        main = Desktop(backend="win32").window(class_name=CLS_MAIN, title_re="카카오톡|KakaoTalk")
+        main = Desktop(backend="win32").window(class_name=CLS_KAKAO, title_re="카카오톡|KakaoTalk")
         main.wait("exists", timeout=5)
     except Exception:
         raise RuntimeError("카카오톡 메인 창을 찾을 수 없습니다. 카톡이 실행 중인지 확인하세요.")
@@ -86,7 +95,7 @@ def handle_save_dialog(out_path, timeout=15):
             except Exception:
                 continue
             if any(k in t for k in ("다른 이름으로 저장", "Save As", "저장")):
-                if w.class_name() == "#32770":
+                if w.class_name() == CLS_DIALOG:
                     dlg = w
                     break
         if dlg:
