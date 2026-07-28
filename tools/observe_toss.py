@@ -165,6 +165,26 @@ JS_SCAN = """() => {
 }"""
 
 
+def page_state(url):
+    """URL 로 현재 상태를 판정한다.
+
+    실측한 리다이렉트:
+      https://business.toss.im/account/sign-in?...&redirect_uri=
+        https%3A%2F%2Fsharelink.toss.im%2Fsignup-start
+
+    쉐어링크는 개인 토스 앱 계정이 아니라 '토스 비즈니스' 계정으로
+    로그인한다. 그리고 미가입 계정은 /home 이 아니라 /signup-start 로
+    보내진다. 이 둘은 다른 상태이므로 구분해서 안내해야 한다.
+    """
+    if "business.toss.im" in url or "/sign-in" in url or "/login" in url:
+        return "login"
+    if "signup" in url:
+        return "signup"
+    if "sharelink.toss.im" in url:
+        return "ready"
+    return "unknown"
+
+
 def dump(w, page, label):
     w("")
     w("=" * 78)
@@ -179,10 +199,14 @@ def dump(w, page, label):
     w(f"URL   : {d['url']}")
     w(f"TITLE : {d['title']}")
 
-    if "login" in d["url"]:
+    state = page_state(d["url"])
+    if state == "login":
         w("")
-        w("⚠️ 로그인 페이지입니다. 로그인된 크롬에 붙지 못했습니다.")
-        w("   크롬을 --remote-debugging-port=9222 로 켰는지 확인하세요.")
+        w("⚠️ 토스 비즈니스 로그인 화면입니다. 대시보드 내용이 아닙니다.")
+    elif state == "signup":
+        w("")
+        w("⚠️ 쉐어링크 가입 화면입니다. 이 계정은 아직 쉐어링크에 가입되어")
+        w("   있지 않습니다. 가입을 마쳐야 대시보드를 볼 수 있습니다.")
 
     w("")
     w(f"── 입력창 {len(d['inputs'])}개 " + "─" * 40)
@@ -276,14 +300,51 @@ def via_launch(w, pw, url):
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
     page.goto(url, wait_until="domcontentloaded")
     page.wait_for_timeout(3000)
-    if "login" in page.url:
-        w("")
-        w("로그인 페이지입니다. 브라우저에서 로그인을 마친 뒤")
-        w("여기서 Enter 를 누르세요.")
-        input()
-        page.goto(url, wait_until="domcontentloaded")
-        page.wait_for_timeout(4000)
     return ctx, page
+
+
+def ensure_ready(w, page, url, tries=3):
+    """대시보드에 도달할 때까지 사용자에게 안내하고 기다린다.
+
+    로그인 화면과 가입 화면은 원인이 다르므로 안내를 따로 준다.
+    자동으로 진행하지 않는다. 가입은 계정 정보가 걸린 결정이라
+    사람이 직접 해야 한다.
+    """
+    for _ in range(tries):
+        state = page_state(page.url)
+        if state == "ready":
+            return True
+
+        w("")
+        if state == "login":
+            w("─" * 60)
+            w("토스 비즈니스 로그인이 필요합니다.")
+            w("쉐어링크는 개인 토스 앱 계정이 아니라 '토스 비즈니스' 계정을 씁니다.")
+            w("브라우저 창에서 이메일/ID 또는 QR코드로 로그인하세요.")
+        elif state == "signup":
+            w("─" * 60)
+            w("이 계정은 아직 쉐어링크에 가입되어 있지 않습니다.")
+            w("(로그인은 됐지만 /signup-start 로 이동했습니다)")
+            w("가입을 진행하시려면 브라우저에서 마친 뒤 이어가세요.")
+            w("가입하지 않을 거라면 그냥 Enter 를 눌러 현재 화면을 덤프합니다.")
+        else:
+            w("─" * 60)
+            w(f"예상 밖의 화면입니다: {page.url}")
+        w("끝났으면 이 콘솔에서 Enter 를 누르세요.")
+        w("─" * 60)
+        try:
+            input()
+        except EOFError:
+            return False
+
+        try:
+            page.goto(url, wait_until="domcontentloaded")
+            page.wait_for_timeout(4000)
+        except Exception as e:
+            w(f"페이지 이동 실패: {e}")
+            return False
+
+    return page_state(page.url) == "ready"
 
 
 def main():
@@ -327,6 +388,9 @@ def main():
                     w("그래도 안 되면 --launch 로 별도 브라우저를 쓰세요 (로그인 1회 필요):")
                     w("  py tools/observe_toss.py --launch")
                     return
+
+            if page_state(page.url) != "ready":
+                ensure_ready(w, page, args.url)
 
             dump(w, page, "쉐어링크 대시보드")
 
