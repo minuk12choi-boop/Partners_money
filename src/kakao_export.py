@@ -143,6 +143,58 @@ def click_button(win, button_title, timeout=5):
         return False
 
 
+def dump_window_info(win, label="창"):
+    """창의 정체를 전부 찍는다. 못 닫을 때 원인을 보기 위한 것이다.
+
+    이 알림창은 클래스명조차 아직 관측되지 않았다. 추측으로 전략을
+    바꾸지 말고 실제 구조를 보고 정하기 위해 남긴다.
+    """
+    print(f"  ── {label} 상세 " + "─" * 30)
+    for name, fn in (
+        ("class_name", win.class_name),
+        ("window_text", win.window_text),
+        ("rectangle", win.rectangle),
+        ("is_visible", win.is_visible),
+        ("is_enabled", win.is_enabled),
+        ("handle", lambda: win.handle),
+    ):
+        try:
+            print(f"     {name:12s}: {fn()!r}")
+        except Exception as e:
+            print(f"     {name:12s}: (실패 {e})")
+
+    try:
+        children = win.children()
+        print(f"     자식 {len(children)}개")
+        for ch in children[:25]:
+            try:
+                print(f"       class={ch.class_name()!r} text={ch.window_text()!r} "
+                      f"rect={ch.rectangle()}")
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"     자식 조회 실패: {e}")
+    print("  " + "─" * 38)
+
+
+def click_by_ratio(win, rx, ry, label=""):
+    """창 안의 상대 좌표를 클릭한다. 컨트롤이 안 잡히는 자체 렌더링 창용.
+
+    최후의 수단이다. 좌표는 화면 구성이 바뀌면 깨지므로,
+    이 경로를 탔다는 사실을 반드시 로그에 남긴다.
+    """
+    try:
+        r = win.rectangle()
+        x = int(r.left + (r.right - r.left) * rx)
+        y = int(r.top + (r.bottom - r.top) * ry)
+        print(f"  좌표 클릭 시도{label}: ({x}, {y}) — 창 {r}")
+        win.click_input(coords=(x - r.left, y - r.top))
+        return True
+    except Exception as e:
+        print(f"  좌표 클릭 실패: {e}")
+        return False
+
+
 def is_dialog_open(pid, title=None):
     """알림창이 아직 떠 있는지 한 번만 훑어 확인한다."""
     return wait_window(title or DLG_DONE, pid=pid, cls=None, timeout=0.5) is not None
@@ -209,31 +261,66 @@ def close_done_dialog(pid, out_path, before_mtime, chat_win=None, timeout=60):
     # 파일이 다 쓰여도 게이지가 100% 로 바뀌기까지 시간이 더 걸린다.
     time.sleep(SETTLE_AFTER_SAVE)
 
-    for attempt in range(1, 4):
-        # 1) 버튼이 컨트롤로 잡히면 그게 제일 깔끔하다. 짧게만 시도한다.
-        if click_button(done, BTN_DONE_OK, timeout=2):
-            if not is_dialog_open(pid):
-                print("  버튼 클릭으로 닫았습니다.")
-                return True
+    # 처음 한 번은 이 창의 정체를 통째로 찍어 둔다.
+    # 클래스명조차 아직 관측되지 않아서, 실패하면 원인을 알 수 없다.
+    dump_window_info(done, "완료 알림창")
 
-        # 2) 알림창 자체에는 set_focus 가 먹지 않는다(실측).
-        #    카톡 채팅방 창에 포커스를 줘야 Enter 가 알림창까지 전달된다.
+    # 여러 전략을 순서대로 시도한다. 어느 것이 통했는지 로그에 남겨
+    # 다음번에 그것만 남기고 정리할 수 있게 한다.
+    def s_button():
+        return click_button(done, BTN_DONE_OK, timeout=2)
+
+    def s_chat_focus_enter():
+        # 알림창 자체에는 set_focus 가 먹지 않는다(실측).
+        # 카톡 채팅방 창에 포커스를 줘야 Enter 가 전달된다는 관측에 따른 것.
         target = chat_win if chat_win is not None else done
+        target.set_focus()
+        time.sleep(1.0)
+        send_keys("{ENTER}")
+        return True
+
+    def s_dialog_focus_enter():
+        done.set_focus()
+        time.sleep(0.8)
+        send_keys("{ENTER}")
+        return True
+
+    def s_click_dialog_then_enter():
+        # 알림창 본문을 한 번 클릭해 활성화한 뒤 Enter.
+        # 버튼이 아니라 여백을 눌러야 하므로 위쪽 가운데를 친다.
+        click_by_ratio(done, 0.5, 0.25, " (본문 활성화)")
+        time.sleep(0.6)
+        send_keys("{ENTER}")
+        return True
+
+    def s_click_ok_button():
+        # 최후의 수단. 스크린샷 기준 '확인'은 오른쪽 아래에 있다.
+        # ('폴더열기'는 왼쪽이라 충분히 떨어져 있다)
+        return click_by_ratio(done, 0.67, 0.85, " ('확인' 위치)")
+
+    strategies = [
+        ("버튼 클릭", s_button),
+        ("카톡창 포커스 + Enter", s_chat_focus_enter),
+        ("알림창 포커스 + Enter", s_dialog_focus_enter),
+        ("알림창 클릭 + Enter", s_click_dialog_then_enter),
+        ("'확인' 좌표 클릭", s_click_ok_button),
+    ]
+
+    for name, fn in strategies:
         try:
-            target.set_focus()
-            time.sleep(1.0)
-            send_keys("{ENTER}")
-            time.sleep(1.2)
+            fn()
         except Exception as e:
-            print(f"  포커스/Enter 실패: {e}")
-
+            print(f"  [{name}] 예외: {e}")
+            continue
+        time.sleep(1.2)
         if not is_dialog_open(pid):
-            print(f"  Enter 로 닫았습니다. (시도 {attempt}회)")
+            print(f"  ✅ 닫힘 — 통한 방법: {name}")
             return True
-        print(f"  아직 열려 있음 → 재시도 {attempt}/3")
-        time.sleep(1.5)
+        print(f"  [{name}] 실패, 다음 방법 시도")
 
-    print("  완료 알림을 닫지 못했습니다. 다음 주기가 막힐 수 있습니다.")
+    print("  ❌ 완료 알림을 닫지 못했습니다. 다음 주기의 Ctrl+S 가 막힙니다.")
+    print("     위의 '완료 알림창 상세' 를 확인해 주세요.")
+    dump_window_info(done, "닫기 실패 후 상태")
     return False
 
 
