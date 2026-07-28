@@ -1,0 +1,28 @@
+# ── 절대 커밋 금지 ────────────────────────────────
+# 토큰/세션/자격증명
+token.json
+.env
+pw_profile/
+
+# 로컬 상태 (기기마다 다름, 개인정보 포함 가능)
+deals.db
+export.txt
+pending.csv
+selectors.json
+run.log
+status.json
+shots/
+dump_selectors.txt
+
+# ── 파이썬 ───────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# ── 편집기 ───────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
