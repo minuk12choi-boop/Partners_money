@@ -140,17 +140,47 @@ def click_button(win, button_title, timeout=5):
         return False
 
 
-def close_done_dialog(pid, timeout=60):
+def wait_file_ready(path, before_mtime, timeout=180, settle=1.5):
+    """파일이 새로 쓰이고 크기가 안정될 때까지 기다린다.
+
+    '대화 내보내기' 알림은 진행률 0% 상태에서 이미 떠 있다.
+    게이지가 차기 전에 닫으면 내보내기가 끝나지 않은 채 중단된다.
+    창이 떴다는 사실만으로 완료를 판단하면 안 되므로, 실제 파일이
+    쓰였는지를 완료 신호로 쓴다.
+    """
+    deadline = time.time() + timeout
+    last_size, stable_since = -1, None
+    while time.time() < deadline:
+        try:
+            st = os.stat(path)
+        except OSError:
+            time.sleep(0.3)
+            continue
+        if st.st_mtime > before_mtime and st.st_size > 0:
+            if st.st_size == last_size:
+                if stable_since is None:
+                    stable_since = time.time()
+                elif time.time() - stable_since >= settle:
+                    return True
+            else:
+                last_size, stable_since = st.st_size, None
+        time.sleep(0.3)
+    return False
+
+
+def close_done_dialog(pid, out_path, before_mtime, timeout=60):
     """저장 완료 알림('대화 내보내기')을 닫는다.
 
     카톡이 내보내기를 마치면 '완료되었습니다' 알림을 띄우고,
     사용자가 확인을 눌러야 사라진다. 방치하면 창이 계속 남아
     다음 주기의 Ctrl+S 를 방해한다. 무인 운영에서는 반드시 닫아야 한다.
 
-    이 창은 표준 #32770 이 아닐 수 있다(클래스 미관측). 그래서
-    클래스를 가리지 않고 제목으로 찾고, 찾으면 실제 클래스명을 로그에
-    남긴다. 다음 실행 때 그 값을 TASKS.md 관측 항목에 기록하기 위함이다.
-    대화량이 많으면 저장에 시간이 걸리므로 넉넉히 기다린다.
+    ⚠️ 이 창은 진행률 0% 일 때 이미 떠 있다(실측). 창을 찾자마자 닫으면
+    저장이 끝나기 전에 중단된다. 반드시 파일이 다 쓰인 뒤에 닫는다.
+
+    창의 클래스는 아직 미관측이라 클래스를 가리지 않고 제목으로 찾고,
+    찾으면 실제 클래스명을 로그에 남긴다. 다음 실행 로그에서 그 값을
+    확인해 TASKS.md 관측 항목에 기록할 것.
     """
     done = wait_window(DLG_DONE, pid=pid, cls=None, timeout=timeout)
     if done is None:
@@ -158,27 +188,34 @@ def close_done_dialog(pid, timeout=60):
         return False
 
     try:
-        print(f"  완료 알림 감지 (class={done.class_name()!r}) → 닫는 중")
+        print(f"  완료 알림 감지 (class={done.class_name()!r}) → 저장 완료 대기")
     except Exception:
-        print("  완료 알림 감지 → 닫는 중")
+        print("  완료 알림 감지 → 저장 완료 대기")
 
-    if click_button(done, BTN_DONE_OK):
+    if wait_file_ready(out_path, before_mtime):
+        print("  저장 완료 확인 → 알림 닫는 중")
+    else:
+        # 파일이 안 쓰였어도 창은 닫아야 다음 주기가 막히지 않는다.
+        print("  저장 완료를 확인하지 못했습니다. 알림만 닫습니다.")
+
+    # 버튼이 컨트롤로 안 잡힐 수 있어 대기를 짧게 준다.
+    if click_button(done, BTN_DONE_OK, timeout=2):
         return True
 
-    # 카톡 자체 렌더링 창이면 버튼이 컨트롤로 안 잡힐 수 있다.
-    # 스크린샷상 '확인'이 기본 버튼이므로 Enter 로 대체한다.
+    # 카톡 자체 렌더링 창이면 버튼이 안 잡힌다.
+    # 실측상 Enter 만으로 닫힌다.
     try:
         done.set_focus()
         time.sleep(0.4)
         send_keys("{ENTER}")
-        print("  버튼을 못 찾아 Enter 로 닫았습니다.")
+        print("  Enter 로 닫았습니다.")
         return True
     except Exception as e:
         print(f"  완료 알림을 닫지 못했습니다: {e}")
         return False
 
 
-def handle_save_dialog(out_path, pid=None, timeout=20):
+def handle_save_dialog(out_path, pid=None, before_mtime=0, timeout=20):
     """Ctrl+S 이후의 대화상자 흐름 전체를 처리한다.
 
     실측한 흐름:
@@ -220,7 +257,7 @@ def handle_save_dialog(out_path, pid=None, timeout=20):
 
     # 완료 알림을 닫는다. 실패해도 파일 자체는 저장됐을 수 있으므로
     # 여기서 False 를 돌려주지는 않되, 로그에는 반드시 남긴다.
-    close_done_dialog(pid)
+    close_done_dialog(pid, out_path, before_mtime)
     return True
 
 
@@ -243,7 +280,7 @@ def export(room_keyword, out_path):
     send_keys("^s")
     time.sleep(1.2)
 
-    if not handle_save_dialog(out_path, pid=pid):
+    if not handle_save_dialog(out_path, pid=pid, before_mtime=before):
         raise RuntimeError("저장 대화상자를 찾지 못했습니다. 카톡 창이 포커스를 받았는지 확인하세요.")
 
     # 파일이 실제로 갱신됐는지 확인
