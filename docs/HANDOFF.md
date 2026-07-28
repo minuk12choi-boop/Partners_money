@@ -18,24 +18,41 @@ OneDrive 안에 두지 않는다. 24시간 무인 운영 중 동기화가 `deals
 
 ```
 카톡방 ─→ 추출 ─→ deals.db ─┬─→ partners_link.py ─→ 쿠팡 딥링크 ─┐
-  ✅        ✅        ✅      │   🔴 로그인 안 됨                   ├─→ threads_post.py
-                             │                                    │      🔴 미검증
+  ✅        ✅        ✅      │   ✅ 생성 검증됨                    ├─→ threads_post.py
+                             │                                    │   🔴 API 호출 미검증
 쉐어링크 대시보드 ───────────┴─→ toss_link.py ────→ 토스 쉐어링크 ─┘
        ✅ 관측됨                   ✅ 발급 검증됨
 ```
+
+**링크 생성은 양쪽 다 뚫렸다. 남은 관문은 Threads 발행 하나다.**
 
 | 파일 | 상태 |
 |---|---|
 | `src/kakao_export.py` | ✅ **실제 환경 검증 완료** (T1) |
 | `src/kakao_deal_extract.py` | ✅ 실제 export.txt 6,500줄로 검증 (T2 대부분) |
 | `src/toss_link.py` | ✅ **발급 검증 완료** (T3-b) |
-| `src/partners_link.py` | 🔴 **로그인 세션 없음** — 다음 관문 (T3-a) |
-| `src/threads_post.py` | 🟡 문구 생성만 검증. API 호출 경로 미검증 |
+| `src/partners_link.py` | ✅ **생성 검증 완료** (T3-a) |
+| `src/threads_post.py` | 🟡 문구 생성은 실데이터로 검증. **API 호출 경로 미검증** |
 | `src/run_all.py` | 🟡 구조만 |
 | `src/threads_auth.py` | ❌ **아직 없음.** TASKS.md T4 에서 작성해야 함 |
 
 **`deals.db` 현재 내용**: 333건 (쿠팡 221 / 토스 112).
-`affiliate_url` 이 채워진 건 토스 1건뿐이다.
+`affiliate_url` 이 채워진 건 각 1건씩 총 2건. 발행된 건은 없다.
+
+실측된 링크 2건:
+
+```
+[coupang:5140279812] 대상 종가 총각김치, 2.3kg, 1개  17,330원
+    https://link.coupang.com/a/fLz3Rghg5s
+    → ...vp/products/5140279812?...&lptag=AF4612286&...
+
+[toss:162535755] 프리미엄 엠머 파로 효소, 3g, 14포, 4박스  9,900원
+    https://toss.im/_m/Hxt0f2Gi
+    → toss.shopping/t/162535755?k=...&referrer=affiliate
+```
+
+`threads_post.py --dry-run` 이 두 건 모두 정상 문구를 만든다.
+토스는 고지가 맨 앞, 쿠팡은 맨 끝. `assert` 3개가 실데이터로 통과한다.
 
 ---
 
@@ -93,50 +110,47 @@ Ctrl+S 이후 흐름은 3단계이며, 마지막 완료 알림은 **Win32 객체
 
 ---
 
+### T3-a — 쿠팡 파트너스 링크 생성 ✅
+
+**딥링크가 만들어진다.** 최종승인 전이어도 웹 UI 로 링크를 만들 수 있다는
+것이 확인됐다(CLAUDE.md Phase 0 의 전제가 맞았다).
+
+핵심만:
+
+- **보고 있던 페이지가 틀렸다.** `#affiliate/ws/link` 는 '상품 링크'
+  화면이고 상품을 검색해 고르는 3단계 마법사다. URL 을 붙여넣는 건
+  **'간편 링크 만들기'** = `#affiliate/ws/link-to-any-page` 다.
+  상단 드롭다운은 **hover 해야 DOM 에 나타나서** 정적 덤프로는 안 보였다.
+- 입력창 `#url`, 버튼 `링크 생성` + **U+200B(폭 0 공백)**.
+  `KNOWN_SELECTORS` 에 넣어 자가탐색이 정상 경로에서는 안 돌게 했다.
+- 링크 생성 API `GET /api/v1/url/any?coupangUrl=...` 의 응답을 가로챈다.
+  `landingUrl` 의 `pageKey` 로 **받은 링크가 정말 그 상품의 것인지
+  대조**하고, `lptag`(내 파트너스 ID)가 없으면 버린다.
+- **로그인은 '자동 로그인' 을 켜야 세션이 남는다.** 켜지 않으면 인증
+  쿠키가 세션 쿠키로 발급돼 브라우저를 닫는 순간 사라진다.
+  `do_login()` 이 직접 켜고, 재시작 후 세션이 남는지까지 검증한다.
+
+자세한 것은 `TASKS.md` 의 T3-a `관측:` 항목들에 있다.
+
+---
+
 ## 다음에 할 일 — 우선순위 순
 
-### 1. 🔴 쿠팡 파트너스 로그인 — **사람이 해야 한다. 여기서 막혀 있다**
-
-```
-py src\partners_link.py --login
-```
-
-`pw_profile/` 이 없다. 이 명령이 한 번도 실행된 적이 없어서
-`partners.coupang.com` 이 `login.coupang.com` 으로 튕긴다.
-로그인 화면에 `pc-otp-login-iframe` 이 있어 추가 인증이 붙을 수 있다.
-
-**소유자 확인 결과: 파트너스 최종승인이 아직 안 났다.**
-따라서 링크 생성 화면이 정상 동작하는지부터가 미지수다.
-CLAUDE.md Phase 0 은 승인 전에도 웹 UI 로 링크를 만들 수 있다는
-전제인데, 그 전제 자체가 아직 확인되지 않았다.
-
-### 2. 쿠팡 링크 생성 관측 (로그인 직후)
-
-```
-py tools\observe_coupang.py                                    # 읽기 전용
-py tools\observe_coupang.py --issue "https://www.coupang.com/vp/products/..."
-```
-
-**자가탐색(`partners_link.py`)을 돌리기 전에 이걸 먼저 본다.**
-토스에서 배운 것이 여기에도 적용될 수 있다 — 링크가 DOM 이 아니라
-API 응답에만 있을 수 있다. `--issue` 모드가 네트워크까지 기록한다.
-
-확인할 것:
-- 링크 생성 UI 가 **iframe 안에 있는가.** 그러면 `JS_SCAN_INPUTS` 는
-  최상위 document 만 훑으므로 후보를 하나도 못 찾는다.
-  관측 도구가 프레임별 입력창 개수를 세 준다.
-- 응답 본문에 `link.coupang.com` 이 들어오는가
-
-### 3. T4 — Threads 인증 (`src/threads_auth.py` 신규 작성)
+### 1. T4 — Threads 인증 (`src/threads_auth.py` 신규 작성)
 
 아직 저장소에 없다. TASKS.md T4 참고.
 Meta 개발자 콘솔 앱 생성 → 테스터 등록 → OAuth → 장기 토큰 → `token.json`.
 
-### 4. T5 전에 반드시 확인할 것
+### 2. T5 전에 반드시 확인할 것
 
 **채팅방 창이 닫혀 있을 때 자동으로 여는 경로가 미검증이다.**
 방을 열어두고 운영하면 안 타지만, 카톡 재시작 후 방 창이 닫힌 상태로
 시작되면 여기서 막힌다. 무인 운영 전환 전에 확인할 것.
+
+**두 사이트의 세션 수명도 모른다.** 쿠팡 인증 쿠키는 1년짜리로 발급되지만
+실제로 얼마나 버티는지는 다른 문제다. 만료되면 무인 운영이 거기서 멈춘다.
+`run_all.py` 가 세션 만료를 알림으로 보내게 돼 있으니 그 경로를 실제로
+테스트할 것.
 
 ---
 
@@ -157,9 +171,8 @@ Meta 개발자 콘솔 앱 생성 → 테스터 등록 → OAuth → 장기 토�
 
 | 항목 | 내용 |
 |---|---|
-| `partners_link.py` | 로그인 세션이 없어 DOM 을 아직 못 봤다 |
-| 쿠팡 링크 생성 UI 위치 | iframe 안일 가능성. 로그인 후 확인 |
-| 쿠팡 세션 수명 | OTP iframe 이 있다. 만료되면 무인 운영이 멈춘다 |
+| 쿠팡 세션 수명 | 인증 쿠키는 1년짜리지만 실제로 얼마나 버티는지는 모른다.<br>로그인 화면에 OTP iframe 이 있어 재로그인에 추가 인증이 붙을 수 있다 |
+| 쿠팡 트래킹 최종 확인 | `lptag` 로 갈음했다. 파트너스 관리자 화면 대조는 아직 |
 | `threads_post.py` | Threads API 호출 경로 전체 미검증 |
 | `threads_auth.py` | 파일 자체가 없음 |
 | 카톡 방 창 자동 열기 | 미검증 (T5 전 필수) |
@@ -178,6 +191,10 @@ Meta 개발자 콘솔 앱 생성 → 테스터 등록 → OAuth → 장기 토�
 - **고지 문구는 플랫폼마다 다르고 위치도 다르다.** 쿠팡은 본문 끝,
   토스는 본문 첫 부분. 섞어 쓰면 양쪽 다 위반이다.
   `build_text()` 의 `assert` 3개를 제거하지 말 것.
+- **두 고지 문구 모두 플랫폼이 지정한 것을 한 글자도 바꾸지 않고 쓴다.**
+  둘 다 `이 포스팅은` 으로 시작한다. 쿠팡 쪽이 `이 게시물은` 으로
+  잘못 적혀 있던 것을 실측으로 바로잡았다(2026-07-29). 공정위 심사지침이
+  걸린 문구라 "자연스럽게" 고쳐 쓰면 안 된다.
 - **`toss_link.py` 도 한 번에 4건, 사이 6초** 를 지킨다.
   쿠팡과 같은 이유다.
 - **`partners_link.py` 의 자가탐색 상한을 올리지 마라.**
@@ -201,6 +218,7 @@ Meta 개발자 콘솔 앱 생성 → 테스터 등록 → OAuth → 장기 토�
   | `tools/observe_toss_cards.py` | 상품 카드 파싱·인덱스 정합성 | 없음 |
   | `tools/observe_toss_issue.py` | 발급 클릭 계측 | **링크 1건 발급** |
   | `tools/observe_coupang.py` | 파트너스 링크 화면 | 기본 없음 / `--issue` 는 링크 1건 생성 |
+  | `tools/observe_coupang_session.py` | 로그인 세션 지속성 | 로그인 1회 + `coupang_state.json` 생성 |
 
   `observe_toss_cards.py` 와 `observe_toss_issue.py` 는 운영 코드의
   `JS_SCAN_CARDS` 를 그대로 import 해서 돌린다. 관측 대상과 실제 동작이

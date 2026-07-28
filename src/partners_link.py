@@ -36,8 +36,51 @@ PROFILE_DIR = os.path.join(HERE, "pw_profile")
 CACHE_PATH = os.path.join(HERE, "selectors.json")
 SHOT_DIR = os.path.join(HERE, "shots")
 
-LINK_PAGE = "https://partners.coupang.com/#affiliate/ws/link"
+# '간편 링크 만들기'. 상품 URL 을 붙여넣어 딥링크를 얻는 화면이다.
+#
+# 예전 값은 '#affiliate/ws/link' 였는데 그건 '상품 링크' 화면이고
+# 성격이 완전히 다르다. 상품을 검색해서 고르는 3단계 마법사
+# (상품 탐색 -> 마음에 드는 상품 선택 -> URL 혹은 배너 만들기)라
+# 입력창이 '찾고 싶은 상품을 검색해보세요!' 검색창 하나뿐이고
+# 링크 생성 버튼 자체가 없다(실측 2026-07-29). URL 을 붙여넣는
+# 전제와 맞지 않는다.
+#
+# 상단 '링크 생성' 드롭다운은 hover 해야 DOM 에 나타난다. 그래서
+# 정적 덤프에서는 하위 메뉴가 안 보였다.
+#   간편 링크 만들기 -> #affiliate/ws/link-to-any-page   ← 이것
+#   상품 링크        -> #affiliate/ws/link
+#   검색 위젯        -> #affiliate/ws/search-bar
+#   이벤트/프로모션   -> #affiliate/ws/events
+#   카테고리 배너     -> #affiliate/ws/banner
+#   다이나믹 배너     -> #affiliate/ws/dynamic-widgets
+LINK_PAGE = "https://partners.coupang.com/#affiliate/ws/link-to-any-page"
+
+# 승인 후 API 키를 받는 곳. T6 에서 쓴다.
+API_PAGE = "https://partners.coupang.com/#affiliate/ws/tools/open-api"
 RE_SHORT = re.compile(r"https?://link\.coupang\.com/[A-Za-z0-9/_\-\?\=\&\.%]+")
+
+# 링크를 만드는 API. 실측으로 확인한 경로다.
+#   GET https://partners.coupang.com/api/v1/url/any?coupangUrl=<상품URL>
+LINK_API_PATH = "/api/v1/url/any"
+
+# landingUrl 안의 상품 ID. 받은 링크가 정말 그 상품의 것인지 대조한다.
+#   .../re/AFFSDP?lptag=AF4612286&pageKey=5140279812&itemId=...
+RE_PAGE_KEY = re.compile(r"[?&]pageKey=(\d+)")
+
+# 실제 화면을 관측해서 확인한 값이다(2026-07-29, tools/observe_coupang.py).
+# 자가탐색보다 이걸 먼저 쓴다. 탐색은 시도 한 번이 곧 사이트 접근
+# 한 번이라 되도록 안 돌리는 게 좋다.
+#
+#   입력창: <input type=text id="url">  (폭 1012)
+#   버튼  : '링크 생성' + U+200B(폭 0 공백)
+#
+# ⚠️ 버튼 텍스트 끝에 보이지 않는 U+200B 이 붙어 있다. 정확일치로
+# 찾으면 못 찾는다. attempt() 가 exact=False 로 부분일치를 쓰므로
+# 여기에는 폭 0 공백 없이 적는다.
+KNOWN_SELECTORS = {
+    "input_sel": "#url",
+    "button_text": "링크 생성",
+}
 
 # ── 접근 빈도 제한 (CLAUDE.md 제약 2) ────────────────────────────
 # run_all.py 의 MAX_LINKS_PER_CYCLE 과 같은 값이다. 그쪽은 --limit 로
@@ -160,8 +203,50 @@ def goto_link_page(page):
     page.wait_for_timeout(3500)
 
 
-def attempt(page, input_sel, button_text, product_url, wait=22):
-    """한 조합으로 시도. 성공 시 딥링크 반환."""
+def attempt(page, input_sel, button_text, product_url, wait=22, expect_pid=None):
+    """한 조합으로 시도. 성공 시 딥링크 반환.
+
+    링크를 만드는 API 의 응답을 먼저 본다. 실측한 응답:
+
+        GET /api/v1/url/any?coupangUrl=<상품URL>
+        {"rCode":"0","data":{
+           "type":"sdp",
+           "shortUrl":"https://link.coupang.com/a/fLzMJE46fI",
+           "landingUrl":".../re/AFFSDP?lptag=AF4612286&pageKey=5140279812&...",
+           "description":"[로켓프레시] 대상 종가 총각김치"}}
+
+    `landingUrl` 의 `pageKey` 가 상품 ID 다. 이걸로 **받은 링크가 정말
+    그 상품의 것인지 대조한다.** 화면을 긁는 방식은 그 대조를 못 한다.
+    페이지에 남아 있던 이전 링크를 주워도 알 방법이 없고, 엉뚱한 상품의
+    링크를 발행하면 신뢰를 잃는다.
+
+    `lptag` 는 내 파트너스 ID 다. 이게 붙어 있어야 수익이 잡힌다.
+
+    API 를 놓치면 화면 긁기(JS_HARVEST)로 넘어간다. 쿠팡은 토스와 달리
+    결과를 '파트너스 URL' 로 화면에도 보여주므로 이 대비책이 유효하다.
+    다만 그 경로에서는 상품 대조를 할 수 없다.
+    """
+    got = {}
+
+    def on_response(resp):
+        if LINK_API_PATH not in resp.url:
+            return
+        try:
+            data = resp.json()
+        except Exception as e:
+            log(f"  링크 API 응답 파싱 실패: {e}")
+            return
+        d = (data or {}).get("data") or {}
+        short = d.get("shortUrl")
+        if not short:
+            log(f"  링크 API 응답에 shortUrl 이 없음: {str(data)[:200]}")
+            return
+        landing = d.get("landingUrl") or ""
+        m = RE_PAGE_KEY.search(landing)
+        got["link"] = short
+        got["pid"] = m.group(1) if m else None
+        got["lptag"] = ("lptag=" in landing)
+
     goto_link_page(page)
     try:
         loc = page.locator(input_sel).first
@@ -172,33 +257,53 @@ def attempt(page, input_sel, button_text, product_url, wait=22):
     before = page.evaluate(JS_HARVEST)
     prev = set(RE_SHORT.findall(before))
 
-    loc.click()
-    loc.fill("")
-    loc.type(product_url, delay=20)
-    page.wait_for_timeout(700)
+    page.on("response", on_response)
+    try:
+        loc.click()
+        loc.fill("")
+        loc.type(product_url, delay=20)
+        page.wait_for_timeout(700)
 
-    if button_text:
-        try:
-            page.get_by_role("button", name=button_text, exact=False).first.click(timeout=4000)
-        except Exception:
+        if button_text:
             try:
-                page.locator(f"text={button_text}").first.click(timeout=3000)
+                page.get_by_role("button", name=button_text, exact=False).first.click(timeout=4000)
             except Exception:
-                loc.press("Enter")
-    else:
-        loc.press("Enter")
+                try:
+                    page.locator(f"text={button_text}").first.click(timeout=3000)
+                except Exception:
+                    loc.press("Enter")
+        else:
+            loc.press("Enter")
 
-    deadline = time.time() + wait
-    while time.time() < deadline:
-        txt = page.evaluate(JS_HARVEST)
-        hits = [h for h in RE_SHORT.findall(txt) if h not in prev]
-        if hits:
-            return max(hits, key=len)
-        page.wait_for_timeout(900)
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            if got.get("link"):
+                if expect_pid and got.get("pid") and got["pid"] != str(expect_pid):
+                    # 요청한 상품과 다른 상품의 링크가 왔다. 저장하면 안 된다.
+                    log(f"  🔴 상품이 다릅니다. 요청 {expect_pid} / 응답 {got['pid']}"
+                        f" — 이 링크는 버립니다")
+                    return None
+                if not got.get("lptag"):
+                    # 트래킹이 없으면 클릭은 되지만 수익이 0으로 찍힌다.
+                    log("  🔴 landingUrl 에 lptag 가 없습니다 — 트래킹이 안 붙은 링크입니다")
+                    return None
+                return got["link"]
+
+            txt = page.evaluate(JS_HARVEST)
+            hits = [h for h in RE_SHORT.findall(txt) if h not in prev]
+            if hits:
+                log("  ! 링크 API 를 놓쳐 화면에서 링크를 건졌습니다 (상품 대조 못 함)")
+                return max(hits, key=len)
+            page.wait_for_timeout(900)
+    finally:
+        try:
+            page.remove_listener("response", on_response)
+        except Exception:
+            pass
     return None
 
 
-def discover(page, product_url):
+def discover(page, product_url, expect_pid=None):
     """셀렉터 조합을 탐색한다. 성공하면 (link, input_sel, button_text).
 
     ⚠️ 한 번 시도할 때마다 페이지를 새로 열고 폼을 채워 제출한다.
@@ -225,7 +330,8 @@ def discover(page, product_url):
             time.sleep(SLEEP_BETWEEN)   # 사람 속도. 줄이지 마세요.
         log(f"  시도 {i+1}/{len(combos)}: "
             f"input={inp['path'][:50]!r} button={bt!r}")
-        link = attempt(page, inp["path"], bt, product_url, wait=14)
+        link = attempt(page, inp["path"], bt, product_url, wait=14,
+                       expect_pid=expect_pid)
         if link:
             log("  → 성공. 조합을 캐시합니다.")
             return link, inp["path"], bt
@@ -235,15 +341,26 @@ def discover(page, product_url):
     return None, None, None
 
 
-def get_link(page, product_url, cache):
-    """캐시 우선, 실패하면 재탐색."""
-    if cache.get("input_sel"):
-        link = attempt(page, cache["input_sel"], cache.get("button_text"), product_url)
-        if link:
-            return link
-        log("캐시된 셀렉터 실패 → 재탐색")
+def get_link(page, product_url, cache, expect_pid=None):
+    """캐시 우선, 실패하면 재탐색.
 
-    link, isel, btext = discover(page, product_url)
+    캐시가 비어 있으면 관측으로 확인된 값을 먼저 쓴다(KNOWN_SELECTORS).
+    자가탐색은 시도 한 번이 곧 사이트 접근 한 번이라 되도록 안 돌리는 게
+    좋다. 실제 화면을 봐서 아는 값이 있는데 탐색부터 돌릴 이유가 없다.
+    """
+    if not cache.get("input_sel"):
+        cache.update(KNOWN_SELECTORS)
+        log(f"캐시가 비어 관측값을 씁니다: input={cache['input_sel']!r} "
+            f"button={cache['button_text']!r}")
+
+    link = attempt(page, cache["input_sel"], cache.get("button_text"),
+                   product_url, expect_pid=expect_pid)
+    if link:
+        save_cache(cache)
+        return link
+
+    log("알려진 셀렉터로 실패 → 자가탐색으로 넘어갑니다")
+    link, isel, btext = discover(page, product_url, expect_pid=expect_pid)
     if link:
         cache["input_sel"] = isel
         cache["button_text"] = btext
@@ -383,14 +500,18 @@ def do_run(limit):
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         goto_link_page(page)
 
-        if "login" in page.url.lower():
-            log("세션 만료. `python partners_link.py --login` 을 먼저 실행하세요.")
+        # URL 만 보면 안 된다. 해시 라우트라 로그아웃 상태에서도 같은
+        # 주소에 머무를 수 있다. 화면 내용으로 판정한다.
+        if not is_logged_in(page):
+            log("세션 만료. `py src/partners_link.py --login` 을 먼저 실행하세요.")
             ctx.close(); conn.close()
             return 0, len(rows)
 
         for pid, title, purl in rows:
             try:
-                link = get_link(page, purl, cache)
+                # 상품 ID 를 넘겨 응답의 pageKey 와 대조하게 한다.
+                # 엉뚱한 상품의 링크를 저장하면 발행 뒤에야 알게 된다.
+                link = get_link(page, purl, cache, expect_pid=pid)
             except Exception as e:
                 log(f"  ! [{pid}] {e}")
                 link = None
@@ -399,6 +520,7 @@ def do_run(limit):
                 page.screenshot(path=os.path.join(SHOT_DIR, f"err_{pid}.png"))
                 log(f"  - [{pid}] 실패 → shots/err_{pid}.png")
                 fail += 1
+                time.sleep(SLEEP_BETWEEN)   # 실패해도 간격은 지킨다
                 continue
 
             conn.execute(

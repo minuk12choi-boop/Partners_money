@@ -33,3 +33,5 @@ venv/
 .DS_Store
 toss_issue_observe.txt
 coupang_observe.txt
+coupang_state.json
+coupang_session_observe.txt

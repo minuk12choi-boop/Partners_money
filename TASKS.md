@@ -353,47 +353,162 @@ python src/kakao_deal_extract.py export.txt --no-resolve
 
 ---
 
-## T3-a. 쿠팡 파트너스 링크 생성 동작시키기 🔴
+## T3-a. 쿠팡 파트너스 링크 생성 ✅ 완료 (2026-07-29)
 
-`src/partners_link.py` — 완전 미검증. 단 **폐기 예정 코드이므로 최소한으로만 손댈 것.**
+`src/partners_link.py` — **실제 환경에서 딥링크 생성 성공.**
+단 **폐기 예정 코드이므로 최소한으로만 손댈 것.**
 
 ```
-python src/partners_link.py --login      # 최초 1회, 수동 로그인
-python src/partners_link.py --limit 1
+py src/partners_link.py --login      # 최초 1회, 수동 로그인
+py src/partners_link.py --limit 1
 ```
 
-이 스크립트는 셀렉터를 하드코딩하지 않고 자가탐색한다.
-`discover()`가 입력창·버튼 후보를 점수순으로 조합해 시도하고,
-성공한 조합을 `selectors.json`에 캐시한다.
+**완료 기준 — 전부 충족 ✅**
+- [x] 상품 URL 1건 → 딥링크 생성 및 `deals.affiliate_url` 저장
+- [x] 생성된 링크가 정상 상품 페이지로 이동
+- [x] 트래킹 검증 — `lptag` 가 붙어 있다
 
-**할 일**
-- 자가탐색이 성공하면 → 로그에 찍힌 조합을 아래 `관측:`에 기록하고 끝
-- 전부 실패하면 → 실제 DOM을 보고 `JS_SCAN_INPUTS` / `JS_SCAN_BUTTONS`의 점수 규칙 보정
-- 결과 링크를 읽는 `JS_HARVEST`가 input의 `value` 속성을 JS로 읽는 이유:
-  input 값은 `outerHTML`에 나타나지 않는다. 이 부분 건드리지 말 것.
+실측 1건:
 
-**주의**
-- 실패해도 재시도 루프를 돌리지 마라. 짧은 시간에 반복 접근하면 계정이 위험하다.
-- 디버깅 중에는 `--limit 1`만 사용한다.
+```
+대상 종가 총각김치, 2.3kg, 1개   17,330원
+  상품 5140279812 → https://link.coupang.com/a/fLz3Rghg5s
+  링크 열기 → coupang.com/vp/products/5140279812?...&lptag=AF4612286&...
+  HTTP 403 이지만 리다이렉트 1회로 정상 도달 (T2 관측과 같은 현상)
+```
 
-**완료 기준**
-- 상품 URL 1건 → `link.coupang.com/...` 딥링크 생성 및 `deals.affiliate_url` 저장
-- 생성된 링크를 브라우저에서 열어 정상 상품 페이지로 이동하는지 확인
-- **파트너스 관리자 페이지에서 그 링크가 내 계정 링크로 조회되는지 확인** (트래킹 검증)
+자가탐색 없이 8초. 파트너스 관리자 페이지 조회는 아직 안 해 봤지만,
+`lptag=AF4612286` 이 내 파트너스 ID 이므로 트래킹은 붙었다.
 
-**관측:** (2026-07-29, `tools/observe_coupang.py` 읽기 전용 모드)
+**관측:** (2026-07-29, `tools/observe_coupang.py`)
 
-> **아직 로그인 세션이 없다. 여기서 막혀 있다.**
+> **🔴 보고 있던 페이지가 애초에 틀렸다**
 >
-> `partners.coupang.com/#affiliate/ws/link` 로 가면 곧바로 튕긴다.
+> `LINK_PAGE` 가 `#affiliate/ws/link` 였는데 그건 **'상품 링크'** 화면이다.
+> 상품을 검색해서 고르는 3단계 마법사다.
 >
 > ```
-> https://login.coupang.com/login/login.pang?rtnUrl=https%3A%2F%2Fpartners.coupang.com%2Fapi%2Fv1%2Fpostlogin
+> 1 상품 탐색 → 2 마음에 드는 상품 선택 → 3 URL 혹은 배너 만들기
 > ```
 >
-> `pw_profile/` 이 없다. `py src/partners_link.py --login` 이 한 번도
-> 실행된 적이 없다. **이건 사람이 해야 하는 단계다.**
+> 입력창이 `찾고 싶은 상품을 검색해보세요!` **검색창 하나뿐**이고
+> 링크 생성 버튼 자체가 없다. URL 을 붙여넣는 전제와 맞지 않는다.
+> 자가탐색을 돌렸으면 검색창에 상품 URL 을 넣고 Enter 를 쳤을 것이다.
 >
+> URL 을 붙여넣는 화면은 **'간편 링크 만들기'** 다.
+>
+> ```
+> #affiliate/ws/link-to-any-page   ← 이것
+> ```
+>
+> **상단 '링크 생성' 드롭다운은 hover 해야 DOM 에 나타난다.** 그래서
+> 정적 덤프에서는 하위 메뉴가 하나도 안 보였다. hover 로 드러난 전체:
+>
+> | 메뉴 | 경로 |
+> |---|---|
+> | 간편 링크 만들기 | `#affiliate/ws/link-to-any-page` |
+> | 상품 링크 | `#affiliate/ws/link` |
+> | 검색 위젯 | `#affiliate/ws/search-bar` |
+> | 이벤트/프로모션 링크 | `#affiliate/ws/events` |
+> | 카테고리 배너 | `#affiliate/ws/banner` |
+> | 다이나믹 배너 | `#affiliate/ws/dynamic-widgets` |
+> | **파트너스 API** | `#affiliate/ws/tools/open-api` ← T6 에서 쓴다 |
+>
+> **간편 링크 만들기 화면 (실측)**
+>
+> | 항목 | 값 |
+> |---|---|
+> | 입력창 | `<input type=text id="url">` 폭 1012 |
+> | 버튼 | `링크 생성` + **U+200B(폭 0 공백)** |
+> | iframe | **0개** — iframe 걱정은 기우였다 |
+>
+> ⚠️ 버튼 텍스트 끝에 보이지 않는 U+200B 이 붙어 있다. 정확일치로 찾으면
+> 못 찾는다. `attempt()` 가 `exact=False` 부분일치를 쓰므로 상수에는
+> 폭 0 공백 없이 적었다.
+>
+> 이 값들을 `KNOWN_SELECTORS` 에 넣어 자가탐색보다 먼저 쓰게 했다.
+> 실제 화면을 봐서 아는 값이 있는데 탐색부터 돌릴 이유가 없다.
+> 탐색은 시도 한 번이 곧 사이트 접근 한 번이다.
+
+**관측:** (2026-07-29, `tools/observe_coupang.py --issue` — 생성 계측)
+
+> **✅ 링크 생성 API 를 찾았다**
+>
+> ```
+> GET https://partners.coupang.com/api/v1/url/any?coupangUrl=<상품URL>
+> {"rCode":"0","rMessage":"","data":{
+>    "type":"sdp",
+>    "shortUrl":"https://link.coupang.com/a/fLzMJE46fI",
+>    "landingUrl":"https://link.coupang.com/re/AFFSDP?lptag=AF4612286
+>                  &pageKey=5140279812&itemId=...&vendorItemId=...&traceid=...",
+>    "title":"쿠팡을 추천 합니다!",
+>    "description":"[로켓프레시] 대상 종가 총각김치"}}
+> ```
+>
+> `landingUrl` 의 **`pageKey` 가 상품 ID** 다. 이걸로 **받은 링크가 정말
+> 그 상품의 것인지 대조한다.** 화면 긁기는 이 대조를 못 한다. 페이지에
+> 남아 있던 이전 링크를 주워도 알 방법이 없고, 엉뚱한 상품의 링크를
+> 발행하면 신뢰를 잃는다. `expect_pid` 와 다르면 링크를 버린다.
+>
+> `lptag` 는 내 파트너스 ID 다. 이게 없으면 클릭은 되지만 수익이 0으로
+> 찍히므로(제약 4) 없으면 역시 버린다.
+>
+> **쿠팡은 토스와 달리 화면에도 링크를 보여준다.** `파트너스 URL` 칸에
+> 나오고 `JS_HARVEST` 가 1건 잡는다. 그래서 API 를 놓쳐도 대비책이
+> 유효하다. 다만 그 경로에서는 상품 대조를 할 수 없다.
+>
+> **🔴 고지 문구가 틀려 있었다 — 수정함**
+>
+> 이 화면이 필수 문구를 직접 명시한다.
+>
+> ```
+> 1. 게시글 작성 시, 아래 문구를 반드시 기재해 주세요.
+> "이 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의
+>  수수료를 제공받습니다."
+> 쿠팡 파트너스의 활동은 공정거래위원회의 심사지침에 따라 ...
+> ```
+>
+> `threads_post.py` 의 `DISCLOSURE` 는 **`이 게시물은`** 으로 시작하고
+> 있었다. 쿠팡이 지정한 것은 **`이 포스팅은`** 이다. 공정위 심사지침이
+> 걸린 문구라 임의로 바꾸면 안 된다. 상수를 쿠팡 문구로 맞췄다.
+> (토스 문구는 원래 맞았다.)
+
+**관측:** (2026-07-29, 로그인 세션이 안 남던 문제 — `tools/observe_coupang_session.py`)
+
+> **'자동 로그인' 을 켜야 세션이 남는다.**
+>
+> 처음 두 번은 로그인에 성공했는데도(스크린샷이 완전히 로그인된 화면)
+> 브라우저를 껐다 켜면 로그아웃이었다. 프로필의 쿠키를 봤더니 로그인
+> 전후 집합이 **완전히 동일**했다. 남은 건 전부 추적용이다.
+>
+> ```
+> PCID, MARKETID, _ga, sid, AFATK, Akamai bm_* / _abck / ak_bmsc
+> ```
+>
+> 회원 인증 쿠키가 아예 없었다. '자동 로그인'(`#login-keep-state`)을
+> 켜고 로그인하니 그제서야 나타났다. **전부 영속(1년)** 이다.
+>
+> ```
+> CT_AT, CSID, CUPT, CPUSR_RL, member_srl, ILOGIN, rememberme
+> ```
+>
+> 인증은 전부 쿠키가 들고 있다. localStorage 에는 Akamai 값
+> (`ak_a`, `ak_ax`, `check_feat_list`)뿐이고 sessionStorage 에는
+> `ak_bm_tab_id` 뿐이다. `storage_state` 로 복원해도 로그인이 유지된다.
+>
+> 해시 라우트 직접 진입이 원인인가도 확인했는데 루트부터 로그아웃이었다.
+> 라우팅 문제가 아니었다.
+>
+> → `do_login()` 이 '자동 로그인' 을 직접 켜고, **로그인 후 브라우저를
+>   껐다 켜서 세션이 실제로 남는지 검증**한다. 로그인 직후에 로그인
+>   상태인 건 당연하다. 문제는 디스크에 남느냐다.
+>
+> → `is_logged_in()` 추가. URL 로만 판정하면 안 된다. 해시 라우트라
+>   로그아웃 상태에서도 같은 주소에 머무를 수 있다. `do_run()` 의
+>   세션 만료 판정도 `"login" in page.url` 에서 이걸로 바꿨다.
+
+**관측:** (2026-07-29, 로그인 화면 — 참고용)
+
 > **프레임 구성 (로그인 화면 기준)**
 >
 > | name | url |
@@ -406,11 +521,8 @@ python src/partners_link.py --limit 1
 > 뜻이고, 세션이 만료되면 무인 운영이 거기서 멈춘다. T5 전에
 > 세션이 얼마나 오래 살아 있는지 확인해야 한다.
 >
-> **iframe 을 반드시 의심할 것.** 로그인 후 링크 생성 UI 가 iframe
-> 안에 있으면 최상위 `document` 에는 입력창이 0개로 보인다.
-> `partners_link.py` 의 `JS_SCAN_INPUTS` 는 최상위 document 만 훑으므로
-> 그 경우 후보를 하나도 못 찾는다. 관측 도구가 프레임별 입력창 개수를
-> 세도록 해 뒀으니 로그인 후 그 값을 먼저 볼 것.
+> iframe 걱정도 했었는데 로그인 후 링크 생성 화면에는 iframe 이 0개다.
+> 기우였다. (관측 도구는 프레임별 입력창 개수를 계속 세 준다.)
 
 **🔴 자가탐색이 제약 2 를 어기고 있었다 — 수정함 (2026-07-29)**
 
@@ -426,6 +538,38 @@ python src/partners_link.py --limit 1
 >   10건이었다. `toss_link.py` 는 이미 자기 상한을 강제하고 있었다.
 >
 > **이 값들을 올리지 말 것.**
+>
+> 지금은 `KNOWN_SELECTORS` 가 있어서 정상 경로에서는 탐색이 아예 안 돈다.
+> 탐색은 쿠팡이 화면을 바꿨을 때만 대비책으로 돈다.
+
+**남은 것**
+- [ ] 파트너스 관리자 페이지에서 그 링크가 내 계정 링크로 조회되는지
+      (`lptag` 확인으로 갈음했지만 관리자 화면 대조는 아직)
+- [ ] 세션 수명. 인증 쿠키는 1년짜리지만 실제로 얼마나 버티는지는 모른다.
+      로그인 화면에 OTP iframe 이 있어 재로그인에 추가 인증이 붙을 수 있다.
+      만료되면 무인 운영이 거기서 멈춘다. T5 전에 확인할 것.
+
+---
+
+## T2 정정 — `src=1139000` 은 방장 것이 아니다 (2026-07-29)
+
+앞선 T2 관측은 최종 URL 의 `src=1139000` 을 "방장의 유입 소스" 로
+단정했다. **틀렸다.**
+
+`clean_product_url()` 로 `src` 를 제거한 URL 을 넣어 만든 **내 딥링크**의
+최종 URL 에도 `src=1139000` 이 그대로 붙는다.
+
+```
+입력  : coupang.com/vp/products/5140279812?itemId=...&vendorItemId=...
+        (src 없음)
+내 링크: link.coupang.com/a/fLz3Rghg5s
+최종  : coupang.com/vp/products/5140279812?...&src=1139000&...&lptag=AF4612286&...
+```
+
+즉 `src` 는 쿠팡이 파트너스 링크에 공통으로 붙이는 소스 코드이고,
+파트너를 식별하는 것은 **`lptag`** 다. 제거 자체는 무해하므로
+`clean_product_url()` 은 그대로 둔다. 다만 "방장 트래킹을 떼어냈다" 는
+설명이 틀렸으므로 여기 적어 둔다.
 
 **다음에 할 것 (로그인 이후)**
 
