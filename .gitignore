@@ -13,6 +13,7 @@ run.log
 status.json
 shots/
 dump_selectors.txt
+kakao_observe.txt
 
 # ── 파이썬 ───────────────────────────────────────
 __pycache__/
