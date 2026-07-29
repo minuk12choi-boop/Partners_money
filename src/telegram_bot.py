@@ -153,6 +153,26 @@ def save(conn, platform, product_id, title, price, product_url,
 
 # ---------------------------------------------------------------- 처리
 
+def lookup_db(conn, platform, product_id):
+    """이미 수집해 둔 딜에서 가격을 찾는다.
+
+    **가장 잘 맞는 출처다.** 딜방이 올린 토스 딜은 메시지에 '역대 최저가
+    N원 / M% 할인' 이 적혀 있고, kakao_deal_extract 가 그걸 파싱해 DB 에
+    넣어 둔다(실측: 토스 125건 전부 가격 보유).
+
+    사장님이 앱에서 새로 발급한 쉐어링크는 코드가 딜방 것과 다르지만,
+    해석하면 같은 `toss.shopping/t/<id>` 로 가므로 product_id 로 만난다.
+    """
+    r = conn.execute(
+        "SELECT title, price, discount_pct, discount_amt, original_price "
+        "FROM deals WHERE platform=? AND product_id=?",
+        (platform, str(product_id))).fetchone()
+    if not r or not r[1]:
+        return None
+    return {"title": r[0], "price": r[1], "discount_pct": r[2],
+            "discount_amt": r[3], "original_price": r[4]}
+
+
 def lookup_toss_price(taca_id):
     """쉐어링크 대시보드 목록에서 가격을 찾는다. 없으면 None.
 
@@ -192,14 +212,34 @@ def handle_toss(conn, text, share_url):
                       f"{share_url}\n"
                       "토스 앱에서 발급한 쉐어링크가 맞는지 확인해 주세요.")
 
-    # 붙여넣은 텍스트가 1순위다. 딜방 글을 같이 보내면 거기 가격이 있다.
+    # 가격 출처를 순서대로 본다.
+    #
+    # ⚠️ 토스 웹에는 가격이 아예 없다(실측). 상품 페이지도, 카테고리
+    # 랭킹도, 토스쇼핑 홈도 '원' 붙은 숫자가 0개다. RSC 페이로드와 script
+    # 전체를 훑어도 없다. 토스가 앱으로 유도하려고 웹에서 뺐다.
+    # 그래서 링크를 열어 읽는 방법은 존재하지 않는다. 아래 두 곳이 전부다.
+    price = pct = amt = original = None
+    title = ""
+    source = ""
+
+    # 1) 붙여넣은 텍스트 — 딜방 글을 같이 보내면 여기 다 있다
     price = K.guess_price(text)
     pct, amt = K.guess_discount(text)
-    original = None
-    title = ""
-    source = "메시지"
+    if price:
+        source = "메시지"
 
-    # 텍스트에 없으면 대시보드 목록에서 찾는다.
+    # 2) 이미 수집해 둔 딜 — 딜방이 올린 것이면 여기 있다. 커버리지가 가장 넓다
+    if not price:
+        info = lookup_db(conn, "toss", product_id)
+        if info:
+            price = info["price"]
+            pct = pct or info.get("discount_pct")
+            amt = amt or info.get("discount_amt")
+            original = info.get("original_price")
+            title = info.get("title") or ""
+            source = "딜방 수집분"
+
+    # 3) 쉐어링크 대시보드 목록 — 큐레이션 117개에 있으면 정가까지 나온다
     if not price:
         info = lookup_toss_price(product_id)
         if info:
@@ -225,15 +265,18 @@ def handle_toss(conn, text, share_url):
         header = f"🛒 토스 · {price:,}원 · 가격출처 {source}"
         return (header, body), None
 
-    # 가격을 못 구했다. 문구는 주되 왜 비었는지와 채우는 법을 알려준다.
+    # 가격을 못 구했다. 문구는 주되 왜 비었는지 정확히 알려준다.
+    #
+    # 링크를 열어 읽는 방법은 없다. 토스가 웹에서 가격을 통째로 뺐다.
+    # 상품 페이지·카테고리 랭킹·토스쇼핑 홈 어디에도 '원' 붙은 숫자가
+    # 하나도 없고, RSC 페이로드와 script 를 전부 훑어도 없다(실측).
     header = "🛒 토스 · 가격 미확인"
     hint = (
         "\n\n⚠️ 가격을 못 찾았습니다.\n"
-        "토스 앱이 복사해 주는 글에는 가격이 없고, 이 상품은 쉐어링크\n"
-        "대시보드 목록(117개)에도 없습니다. 토스 웹은 가격을 주지 않습니다.\n\n"
-        "가격을 넣으려면 둘 중 하나로 다시 보내 주세요.\n"
-        "  · 딜방 글을 같이 붙여넣기 (거기 최저가·할인율이 있습니다)\n"
-        "  · 직접 적기 — 예: 최저가 9,900원 88% 할인")
+        "이 상품은 딜방에도 안 올라왔고 쉐어링크 대시보드 목록에도 없습니다.\n"
+        "토스는 웹에서 가격을 아예 빼 놨습니다(상품 페이지·랭킹·홈 전부).\n"
+        "그래서 링크를 열어 읽어올 방법이 없습니다.\n\n"
+        "딜방 글을 같이 붙여넣어 주시면 거기 최저가·할인율이 있습니다.")
     return (header, body + hint), None
 
 
@@ -249,6 +292,17 @@ def handle_coupang(conn, text, deal_url):
     title = K.guess_title(text, deal_url)
     price = K.guess_price(text)
     pct, amt = K.guess_discount(text)
+    original = None
+
+    # 붙여넣은 글에 가격이 없으면(링크만 보낸 경우) 수집해 둔 딜에서 찾는다.
+    if not price:
+        info = lookup_db(conn, "coupang", product_id)
+        if info:
+            price = info["price"]
+            pct = pct or info.get("discount_pct")
+            amt = amt or info.get("discount_amt")
+            original = info.get("original_price")
+            title = title or info.get("title") or ""
 
     # 내 딥링크를 새로 만든다. 방장 링크는 여기서 버려진다.
     cache = P.load_cache()
@@ -274,9 +328,9 @@ def handle_coupang(conn, text, deal_url):
                       "shots/ 의 스크린샷을 확인해 주세요.")
 
     body = build_text(title or f"상품 {product_id}", price, my_link,
-                      "coupang", pct, amt)
+                      "coupang", pct, amt, original)
     save(conn, "coupang", product_id, title, price, product_url,
-         my_link, text, pct, amt)
+         my_link, text, pct, amt, original)
     header = (f"🛒 쿠팡 · {f'{price:,}원' if price else '가격 미확인'} "
               f"· 내 링크로 교체됨")
     return (header, body), None
