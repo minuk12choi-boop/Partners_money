@@ -34,3 +34,5 @@ venv/
 .vscode/
 .idea/
 .DS_Store
+tg_offset.json
+*.lock

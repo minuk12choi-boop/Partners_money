@@ -37,6 +37,7 @@ from datetime import datetime
 from playwright.sync_api import sync_playwright
 
 from env import load_env
+from lock import profile_lock
 from schema import ensure_deals
 
 load_env()
@@ -454,7 +455,7 @@ def do_run(limit, dry_run, max_price=MAX_PRICE):
     os.makedirs(SHOT_DIR, exist_ok=True)
     ok = fail = skip = 0
 
-    with sync_playwright() as pw:
+    with profile_lock(PROFILE_DIR, log=log), sync_playwright() as pw:
         ctx = open_context(pw)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
 

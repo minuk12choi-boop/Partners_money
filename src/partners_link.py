@@ -31,6 +31,7 @@ from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 from env import load_env
+from lock import profile_lock
 
 load_env()
 
@@ -519,7 +520,8 @@ def do_run(limit):
     os.makedirs(SHOT_DIR, exist_ok=True)
     ok = fail = 0
 
-    with sync_playwright() as pw:
+    # 텔레그램 봇도 같은 프로필로 링크를 만든다. 동시에 열면 한쪽이 죽는다.
+    with profile_lock(PROFILE_DIR, log=log), sync_playwright() as pw:
         ctx = open_context(pw)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         goto_link_page(page)

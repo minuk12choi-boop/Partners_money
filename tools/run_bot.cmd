@@ -14,7 +14,9 @@ REM ---------------------------------------------------------------
 chcp 65001 >nul
 cd /d "%~dp0..\src"
 
-echo [%date% %time%] run_bot.cmd 시작 >> "%~dp0..\src\run.log"
+REM cmd 는 이 파일을 ANSI 로 읽는다. echo 에 한글을 쓰면 로그가 깨진다.
+REM 한글은 REM 주석에만 둔다(무시되므로 안전).
+echo [%date% %time%] run_bot.cmd start >> "%~dp0..\src\run.log"
 
 REM py 런처가 PATH 에 없을 수 있다. 없으면 python 으로 넘어간다.
 where py >nul 2>&1
@@ -24,4 +26,4 @@ if %errorlevel%==0 (
     python run_all.py
 )
 
-echo [%date% %time%] run_bot.cmd 종료 (코드 %errorlevel%) >> "%~dp0..\src\run.log"
+echo [%date% %time%] run_bot.cmd exit=%errorlevel% >> "%~dp0..\src\run.log"
