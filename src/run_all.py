@@ -155,11 +155,21 @@ def cycle(room, dry_run=False):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--room", required=True, help="채팅방 이름 일부")
+    # 작업 스케줄러에 등록할 때 인자를 길게 쓰면 방 이름의 공백·한글 때문에
+    # 따옴표가 꼬인다. `.env` 의 KAKAO_ROOM 을 기본값으로 쓴다.
+    ap.add_argument("--room", default=os.environ.get("KAKAO_ROOM"),
+                    help="채팅방 이름 일부 (기본: .env 의 KAKAO_ROOM)")
     ap.add_argument("--once", action="store_true", help="1회만 실행")
-    ap.add_argument("--dry-run", action="store_true", help="스레드 발행은 문구만 출력")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="텔레그램 전송은 하지 않고 문구만 출력")
     ap.add_argument("--cycle", type=int, default=CYCLE_MINUTES)
     args = ap.parse_args()
+
+    if not args.room:
+        raise SystemExit(
+            "채팅방 이름이 없습니다.\n"
+            "  `.env` 에 KAKAO_ROOM 을 적거나 --room 으로 넘기세요.\n"
+            "  이모지는 넣지 마세요. 콘솔 인코딩 문제가 생깁니다(T1 관측).")
 
     log("=" * 55)
     log(f"시작. 방='{args.room}' 주기={args.cycle}분 dry_run={args.dry_run}")
@@ -172,8 +182,14 @@ def main():
 
             # 쿠팡과 토스 중 한쪽이라도 링크가 나오면 파이프라인은 살아 있다.
             # 둘 다 실패해야 핵심 실패로 본다.
+            #
+            # 전달까지 포함한다. 이 파이프라인의 목적은 이제 '텔레그램으로
+            # 문구를 보내는 것' 이다. 전달이 깨지면 앞이 다 성공해도 사장님
+            # 손에는 아무것도 안 들어온다. 보낼 게 없을 때는 성공으로
+            # 끝나므로(종료코드 0) 이 조건이 과하게 걸리지 않는다.
             any_link = results.get("link") or results.get("toss_link")
-            critical_ok = results.get("extract") and any_link
+            critical_ok = (results.get("extract") and any_link
+                           and results.get("deliver"))
             if critical_ok:
                 if fails:
                     notify(f"{fails}회 실패 후 복구되었습니다.")
