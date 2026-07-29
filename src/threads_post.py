@@ -160,7 +160,9 @@ def build_price_block(price, discount_pct=None, discount_amt=None,
         return ""
     lines = [f"\n💥 최저가 {price:,}원"]
     if original_price and original_price > price:
-        pct = discount_pct or round((original_price - price) / original_price * 100)
+        # 내림한다. 반올림하면 실제보다 높은 할인율을 광고하게 된다.
+        # 토스 앱도 내림이다(24,800 → 7,990 을 67% 로 표기. 반올림은 68%).
+        pct = discount_pct or int((original_price - price) / original_price * 100)
         lines.append(f"↳ 정가 {original_price:,}원 → {pct}% 할인")
     elif discount_amt and discount_pct:
         lines.append(f"↳ 평균가 대비 {discount_amt:,}원 ↓ ({discount_pct}%)")

@@ -81,25 +81,24 @@ RE_ROOM_MARKER = re.compile(
 
 HELP = """무엇을 보내면 되는지 알려드릴게요.
 
-1) 내 토스 쉐어링크
-   토스 앱에서 발급한 https://toss.im/_m/... 를 보내세요.
+1) 내 토스 쉐어링크 + 숫자 두 개
+   https://toss.im/_m/abc123 7990 24800
 
-2) 상품 화면 스크린샷
-   토스 앱 상품 화면을 찍어 보내시면 상품명·판매가·정가·할인율을 읽습니다.
-   토스가 웹에서 가격을 빼 놔서, 딜방에 안 올라온 상품은 이게 유일한 방법입니다.
+   앞이 판매가, 뒤가 정가입니다. 할인율은 알아서 계산합니다.
+   정가를 모르시면 판매가 하나만 적으셔도 됩니다.
+   상품명은 링크에서 자동으로 가져오니 안 치셔도 됩니다.
 
-   ※ 링크와 사진은 따로 보내셔도 됩니다. 순서도 상관없습니다.
-      15분 안에 둘 다 오면 알아서 짝을 맞춥니다.
+   딜방에 올라왔던 상품이면 숫자도 안 치셔도 됩니다. 링크만 보내세요.
+   이미 받아 둔 가격에서 찾습니다.
 
-3) 딜방의 쿠팡 글
+2) 딜방의 쿠팡 글
    방장 글을 통째로 복사해서 보내세요.
    방장 링크는 버리고 사장님 파트너스 링크를 새로 만들어 드립니다.
+   가격·할인율은 그 글에서 읽습니다.
 
 ※ 딜방의 토스 글은 처리할 수 없습니다. 토스는 상품을 지정해서 링크를
    만들 방법이 없어서(PC 웹에 검색이 없음), 사장님이 앱에서 직접 발급한
-   링크가 필요합니다.
-
-/cancel — 기다리고 있는 사진·링크를 지웁니다."""
+   링크가 필요합니다."""
 
 
 def log(msg=""):
@@ -310,7 +309,13 @@ def handle_toss(conn, text, share_url, shot=None):
         if price:
             source = "스크린샷"
 
-    # 2) 붙여넣은 텍스트 — 딜방 글을 같이 보내면 여기 다 있다
+    # 2) 직접 적어 주신 숫자 — 링크 뒤에 `7990 24800` 처럼
+    if not price:
+        price, original = parse_manual_prices(text)
+        if price:
+            source = "직접 입력"
+
+    # 3) 붙여넣은 텍스트 — 딜방 글을 같이 보내면 여기 다 있다
     if not price:
         price = K.guess_price(text)
         if price:
@@ -318,7 +323,7 @@ def handle_toss(conn, text, share_url, shot=None):
     if pct is None and amt is None:
         pct, amt = K.guess_discount(text)
 
-    # 3) 이미 수집해 둔 딜 — 딜방이 올린 것이면 여기 있다. 커버리지가 가장 넓다
+    # 4) 이미 수집해 둔 딜 — 딜방이 올린 것이면 여기 있다. 커버리지가 가장 넓다
     if not price:
         info = lookup_db(conn, "toss", product_id)
         if info:
@@ -329,7 +334,7 @@ def handle_toss(conn, text, share_url, shot=None):
             title = title or info.get("title") or ""
             source = "딜방 수집분"
 
-    # 4) 쉐어링크 대시보드 목록 — 큐레이션 117개에 있으면 정가까지 나온다
+    # 5) 쉐어링크 대시보드 목록 — 큐레이션 117개에 있으면 정가까지 나온다
     if not price:
         info = lookup_toss_price(product_id)
         if info:
@@ -362,12 +367,13 @@ def handle_toss(conn, text, share_url, shot=None):
     # 하나도 없고, RSC 페이로드와 script 를 전부 훑어도 없다(실측).
     header = f"🛒 토스 · {NO_PRICE}"
     hint = (
-        "\n\n⚠️ 가격을 못 찾았습니다.\n"
-        "이 상품은 딜방에도 안 올라왔고 쉐어링크 대시보드 목록에도 없습니다.\n"
-        "토스는 웹에서 가격을 아예 빼 놨습니다(상품 페이지·랭킹·홈 전부).\n"
-        "그래서 링크를 열어 읽어올 방법이 없습니다.\n\n"
-        "📸 토스 앱 상품 화면을 캡처해서 보내 주세요. 그 사진에서\n"
-        "   상품명·판매가·정가·할인율을 읽어 채워 드립니다.")
+        "\n\n⚠️ 가격만 못 찾았습니다. 상품명·링크는 다 맞습니다.\n"
+        "토스가 웹에서 가격을 아예 빼 놔서(상품 페이지·랭킹·홈 전부)\n"
+        "링크를 열어 읽어올 방법이 없습니다.\n\n"
+        "링크 뒤에 숫자만 붙여서 다시 보내 주세요.\n\n"
+        f"  {share_url} 7990 24800\n\n"
+        "앞이 판매가, 뒤가 정가입니다. 할인율은 알아서 계산합니다.\n"
+        "정가를 모르시면 판매가 하나만 적으셔도 됩니다.")
     return (header, body + hint), None
 
 
@@ -384,6 +390,10 @@ def handle_coupang(conn, text, deal_url, shot=None):
     price = K.guess_price(text)
     pct, amt = K.guess_discount(text)
     original = None
+
+    # 링크 뒤에 숫자만 적어 주신 경우
+    if not price:
+        price, original = parse_manual_prices(text)
 
     # 스크린샷을 같이 보내셨으면 거기 값이 가장 정확하다. 빈 칸만 채운다.
     if shot:
@@ -472,6 +482,48 @@ def handle_message(conn, text, shot=None):
 def has_link(text):
     return bool(RE_TOSS_SHARE.search(text or "")
                 or RE_COUPANG_ANY.search(text or ""))
+
+
+RE_URL_ANY = re.compile(r"https?://\S+")
+RE_BARE_NUM = re.compile(r"\d[\d,]*")
+# 숫자만 적으셨는지 판별할 때, 숫자 말고 있어도 되는 것들.
+# ⚠️ 순서가 중요하다. 문자클래스를 앞에 두면 '/toss' 의 '/' 만 먹고
+#    'toss' 가 남아 직접 입력이 통째로 무시된다(실측).
+RE_ALLOWED_LEFTOVER = re.compile(r"/toss|정가|판매가|[\s,원%/\-~+]")
+
+
+def parse_manual_prices(text):
+    """링크 뒤에 숫자만 적어 주셨을 때 읽는다. (판매가, 정가).
+
+        <링크> 7990 24800      → 판매가 7,990 / 정가 24,800
+        <링크> 7,990원 정가 24,800원  → 같음
+        <링크> 7990            → 판매가만
+
+    두 개면 작은 쪽이 판매가, 큰 쪽이 정가다. 할인율은 따로 안 치셔도
+    정가에서 계산된다.
+
+    ⚠️ **숫자 말고 다른 글자가 섞여 있으면 손대지 않는다.** 딜방 글에는
+
+        🚨 역대 최저가 2,980원 🚨
+        ↳ 평균가 대비 🔻 2,439원 🔻 46%
+
+    처럼 금액이 둘 있는데, 작은 2,439원은 가격이 아니라 '할인액'이다.
+    여기서 두 개라고 덥석 집으면 할인액을 판매가로 발행하게 된다.
+    그래서 딜방 글은 기존 파싱(guess_price)에 그대로 맡긴다.
+    """
+    stripped = RE_URL_ANY.sub(" ", text or "")
+    nums = []
+    for m in RE_BARE_NUM.finditer(stripped):
+        v = int(m.group(0).replace(",", ""))
+        if 100 <= v <= 50_000_000 and v not in nums:
+            nums.append(v)
+    if not 1 <= len(nums) <= 2:
+        return None, None
+    if RE_ALLOWED_LEFTOVER.sub("", RE_BARE_NUM.sub(" ", stripped)).strip():
+        return None, None       # 글이 섞여 있다
+    if len(nums) == 1:
+        return nums[0], None
+    return min(nums), max(nums)
 
 
 # ---------------------------------------------------------------- 메인
