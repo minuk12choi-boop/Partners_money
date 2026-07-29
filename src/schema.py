@@ -41,9 +41,10 @@ BASE_SCHEMA = """
 
 # 처음 설계 이후에 추가된 컬럼들. 옛 DB 를 만나면 하나씩 붙인다.
 ADDED_COLUMNS = [
-    ("sent_at",      "TEXT"),     # 텔레그램으로 보낸 시각
-    ("discount_pct", "INTEGER"),  # 할인율 %  (딜방 메시지에서 파싱)
-    ("discount_amt", "INTEGER"),  # 평균가 대비 할인액(원)
+    ("sent_at",        "TEXT"),     # 텔레그램으로 보낸 시각
+    ("discount_pct",   "INTEGER"),  # 할인율 %
+    ("discount_amt",   "INTEGER"),  # 평균가 대비 할인액(원) — 쿠팡 딜방 표기
+    ("original_price", "INTEGER"),  # 정가 — 토스 대시보드 API 의 originalPrice
 ]
 
 

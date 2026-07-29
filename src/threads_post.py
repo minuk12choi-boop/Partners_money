@@ -142,17 +142,27 @@ def refresh_token():
 
 # ---------------------------------------------------------------- 문구 생성
 
-def build_price_block(price, discount_pct=None, discount_amt=None):
+def build_price_block(price, discount_pct=None, discount_amt=None,
+                      original_price=None):
     """가격·할인 줄. 값이 있을 때만 만든다.
 
-    할인 정보는 딜방 메시지에서 파싱한 방장의 표기를 그대로 쓴다.
-    평균가를 우리가 다시 계산하지 않는다 — 평균가 = 최저가 + 할인액 이라
-    새로 얻을 정보가 없고, 없는 값을 지어내면 틀린 가격을 내보내게 된다.
+    출처가 플랫폼마다 다르고 의미도 다르다. 섞으면 틀린 표시가 된다.
+
+      쿠팡 : 딜방 메시지의 '평균가 대비 15,902원 🔻 38%'
+             → 기준이 **평균가**다. 정가가 아니다.
+      토스 : 대시보드 API 의 originalPrice / discountRate
+             → 기준이 **정가**다.
+
+    정가를 알면 정가를 보여주는 쪽이 정확하다. 없으면 평균가 대비로 쓴다.
+    우리가 다시 계산하지 않는다. 없는 값을 지어내면 틀린 가격이 나간다.
     """
     if not price:
         return ""
     lines = [f"\n💥 최저가 {price:,}원"]
-    if discount_amt and discount_pct:
+    if original_price and original_price > price:
+        pct = discount_pct or round((original_price - price) / original_price * 100)
+        lines.append(f"↳ 정가 {original_price:,}원 → {pct}% 할인")
+    elif discount_amt and discount_pct:
         lines.append(f"↳ 평균가 대비 {discount_amt:,}원 ↓ ({discount_pct}%)")
     elif discount_pct:
         lines.append(f"↳ {discount_pct}% 할인")
@@ -162,7 +172,7 @@ def build_price_block(price, discount_pct=None, discount_amt=None):
 
 
 def build_text(title, price, url, platform="coupang",
-               discount_pct=None, discount_amt=None):
+               discount_pct=None, discount_amt=None, original_price=None):
     """플랫폼에 맞는 고지 문구로 본문을 만든다.
 
     두 플랫폼 모두 고지를 맨 앞에 둔다. 토스는 운영정책이 '첫 부분' 을
@@ -176,7 +186,8 @@ def build_text(title, price, url, platform="coupang",
     def render(t):
         body = BODY_TEMPLATE.format(
             title=t.strip(), url=url.strip(), disclosure=disclosure,
-            price_block=build_price_block(price, discount_pct, discount_amt))
+            price_block=build_price_block(price, discount_pct, discount_amt,
+                                          original_price))
         return re.sub(r"\n{3,}", "\n\n", body).strip()
 
     body = render(title)
@@ -251,13 +262,14 @@ def load_ready_rows(conn):
     """
     rows = conn.execute(
         "SELECT platform, product_id, title, price, affiliate_url, "
-        "discount_pct, discount_amt FROM deals "
+        "discount_pct, discount_amt, original_price FROM deals "
         "WHERE affiliate_url IS NOT NULL AND affiliate_url != '' "
         "AND posted_at IS NULL ORDER BY found_at DESC"
     ).fetchall()
     return [{"platform": r[0], "product_id": r[1], "title": r[2],
              "price": r[3], "affiliate_url": r[4],
-             "discount_pct": r[5], "discount_amt": r[6]}
+             "discount_pct": r[5], "discount_amt": r[6],
+             "original_price": r[7]}
             for r in rows if str(r[4]).startswith("http")]
 
 
@@ -299,7 +311,7 @@ def main():
             print(f"[{r['platform']}:{r['product_id']}]")
             print(build_text(r["title"], r["price"], r["affiliate_url"],
                              r["platform"], r.get("discount_pct"),
-                             r.get("discount_amt")))
+                             r.get("discount_amt"), r.get("original_price")))
         print("─" * 50)
         conn.close()
         return
@@ -323,7 +335,7 @@ def main():
         try:
             text = build_text(r["title"], r["price"], r["affiliate_url"],
                               r["platform"], r.get("discount_pct"),
-                              r.get("discount_amt"))
+                              r.get("discount_amt"), r.get("original_price"))
         except (AssertionError, ValueError) as e:
             # 고지 문구 문제는 넘어가면 안 되는 사안이다. 건너뛰고 로그에 남긴다.
             print(f"본문 생성 거부 [{r['platform']}:{r['product_id']}]: {e}")

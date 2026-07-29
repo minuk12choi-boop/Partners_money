@@ -36,6 +36,7 @@ from datetime import datetime
 
 from playwright.sync_api import sync_playwright
 
+import toss_api
 from env import load_env
 from lock import profile_lock
 from schema import ensure_deals
@@ -359,22 +360,33 @@ def already_known(conn, product_id):
         (product_id,)).fetchone() is not None
 
 
-def save_deal(conn, product_id, card, sharelink):
+def save_deal(conn, product_id, card, sharelink, api=None):
+    """`api` 는 toss_api.lookup() 결과. 정가처럼 카드에 없는 값을 준다.
+
+    카드(DOM)에서 얻는 값보다 API 값이 정확하다. 카드에는 정가가 아예
+    표시되지 않고, 특가율도 배지 텍스트를 긁은 것이다. API 가 있으면
+    그쪽을 우선한다. 없는 값은 지어내지 않고 비워 둔다.
+    """
     now = datetime.now().isoformat(timespec="seconds")
-    # 대시보드가 특가율을 직접 준다. 딜방 메시지를 파싱해 얻는 값과 같은
-    # 성격이므로 같은 컬럼에 넣는다. 발행 문구가 이걸 쓴다.
-    # 할인액은 대시보드에 없다. 없는 값을 지어내지 않는다.
+    api = api or {}
+    price = api.get("price") or card.get("price")
+    pct = api.get("discount_pct") or card.get("salePct")
+    original = api.get("original_price")
+
+    note = (f"쉐어링크 대시보드 · {pct}% 특가 · "
+            f"개당 {card.get('reward')}원 수익 · 평점 {card.get('rating')}")
+    if original:
+        note += f" · 정가 {original:,}원"
+
     conn.execute(
         "INSERT OR REPLACE INTO deals (platform,product_id,title,price,source_url,"
         "product_url,raw_message,chat_time,found_at,affiliate_url,posted_at,"
-        "discount_pct,discount_amt) "
-        "VALUES ('toss',?,?,?,?,?,?,?,?,?,NULL,?,NULL)",
-        (product_id, card["title"], card.get("price"),
+        "discount_pct,discount_amt,original_price) "
+        "VALUES ('toss',?,?,?,?,?,?,?,?,?,NULL,?,NULL,?)",
+        (product_id, api.get("title") or card["title"], price,
          PRODUCTS_URL, f"https://toss.shopping/t/{product_id}",
          # 딜방이 아니라 대시보드에서 온 건이라는 걸 남긴다
-         f"쉐어링크 대시보드 · {card.get('salePct')}% 특가 · "
-         f"개당 {card.get('reward')}원 수익 · 평점 {card.get('rating')}",
-         now, now, sharelink, card.get("salePct")),
+         note, now, now, sharelink, pct, original),
     )
     conn.commit()
 
@@ -486,6 +498,7 @@ def do_run(limit, dry_run, max_price=MAX_PRICE):
             ctx.close(); conn.close()
             return 0, 0
 
+        api_cache = {}
         for c in targets:
             link, pid = issue_link(page, c["idx"])
             if not link:
@@ -515,7 +528,10 @@ def do_run(limit, dry_run, max_price=MAX_PRICE):
                 time.sleep(SLEEP_BETWEEN)
                 continue
 
-            save_deal(conn, pid, c, link)
+            # 목록 API 에서 정가 등 카드에 없는 값을 보탠다.
+            # 한 번 실행에 한 번만 부르도록 api_cache 를 재사용한다.
+            save_deal(conn, pid, c, link,
+                      toss_api.lookup(page, pid, log=log, cache=api_cache))
             ok += 1
             log(f"  + [{pid}] {c['title'][:35]} → {link}")
             time.sleep(SLEEP_BETWEEN)   # 사람 속도. 줄이지 마세요.

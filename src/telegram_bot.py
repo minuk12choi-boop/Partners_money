@@ -54,6 +54,8 @@ from threads_post import build_text
 
 import kakao_deal_extract as K
 import partners_link as P
+import toss_api
+import toss_link as T
 from lock import profile_lock, LockBusy
 
 load_env()
@@ -132,7 +134,7 @@ def save_offset(v):
 # ---------------------------------------------------------------- 저장
 
 def save(conn, platform, product_id, title, price, product_url,
-         affiliate_url, raw, pct, amt):
+         affiliate_url, raw, pct, amt, original=None):
     """봇으로 만든 건도 DB 에 남긴다.
 
     `sent_at` 을 지금으로 채운다. 이미 사장님 손에 갔으므로 주기 작업이
@@ -142,14 +144,44 @@ def save(conn, platform, product_id, title, price, product_url,
     conn.execute(
         "INSERT OR REPLACE INTO deals (platform,product_id,title,price,"
         "source_url,product_url,raw_message,chat_time,found_at,affiliate_url,"
-        "posted_at,sent_at,discount_pct,discount_amt) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,NULL,?,?,?)",
+        "posted_at,sent_at,discount_pct,discount_amt,original_price) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?)",
         (platform, product_id, title, price, "telegram_bot", product_url,
-         (raw or "")[:2000], now, now, affiliate_url, now, pct, amt))
+         (raw or "")[:2000], now, now, affiliate_url, now, pct, amt, original))
     conn.commit()
 
 
 # ---------------------------------------------------------------- 처리
+
+def lookup_toss_price(taca_id):
+    """쉐어링크 대시보드 목록에서 가격을 찾는다. 없으면 None.
+
+    토스 앱이 클립보드에 넣어주는 텍스트에는 가격이 없고, 상품 웹페이지도
+    가격을 안 준다(실측). 대시보드 목록 API 가 유일한 출처다.
+    브라우저가 필요하므로 몇 초 걸린다.
+    """
+    try:
+        with profile_lock(T.PROFILE_DIR, log=log):
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as pw:
+                ctx = T.open_context(pw)
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                page.goto(T.PRODUCTS_URL, wait_until="domcontentloaded")
+                page.wait_for_timeout(3500)
+                if T.needs_login(page.url):
+                    ctx.close()
+                    log("토스 세션 만료 — 가격 조회 건너뜀")
+                    return None
+                info = toss_api.lookup(page, taca_id, log=log)
+                ctx.close()
+                return info
+    except LockBusy as e:
+        log(f"가격 조회 건너뜀(브라우저 사용 중): {e}")
+        return None
+    except Exception as e:
+        log(f"가격 조회 실패: {e}")
+        return None
+
 
 def handle_toss(conn, text, share_url):
     """내 토스 쉐어링크 → 양식."""
@@ -160,23 +192,49 @@ def handle_toss(conn, text, share_url):
                       f"{share_url}\n"
                       "토스 앱에서 발급한 쉐어링크가 맞는지 확인해 주세요.")
 
-    title = K.fetch_toss_title(product_url, session) or ""
+    # 붙여넣은 텍스트가 1순위다. 딜방 글을 같이 보내면 거기 가격이 있다.
+    price = K.guess_price(text)
+    pct, amt = K.guess_discount(text)
+    original = None
+    title = ""
+    source = "메시지"
+
+    # 텍스트에 없으면 대시보드 목록에서 찾는다.
+    if not price:
+        info = lookup_toss_price(product_id)
+        if info:
+            price = info.get("price")
+            original = info.get("original_price")
+            pct = pct or info.get("discount_pct")
+            title = info.get("title") or ""
+            source = "대시보드"
+
     if not title:
-        # og:title 이 없으면 붙여넣은 텍스트에서 뽑아 본다
+        title = K.fetch_toss_title(product_url, session) or ""
+    if not title:
         title = K.guess_title(text, share_url)
     if not title:
         return None, ("상품명을 확인하지 못했습니다.\n"
                       "상품명을 포함해 다시 보내 주세요.")
 
-    price = K.guess_price(text)
-    pct, amt = K.guess_discount(text)
-
-    body = build_text(title, price, share_url, "toss", pct, amt)
+    body = build_text(title, price, share_url, "toss", pct, amt, original)
     save(conn, "toss", product_id, title, price, product_url,
-         share_url, text, pct, amt)
-    header = (f"🛒 토스 · {f'{price:,}원' if price else '가격 미확인'} "
-              f"· 내 링크 그대로 사용")
-    return (header, body), None
+         share_url, text, pct, amt, original)
+
+    if price:
+        header = f"🛒 토스 · {price:,}원 · 가격출처 {source}"
+        return (header, body), None
+
+    # 가격을 못 구했다. 문구는 주되 왜 비었는지와 채우는 법을 알려준다.
+    header = "🛒 토스 · 가격 미확인"
+    hint = (
+        "\n\n⚠️ 가격을 못 찾았습니다.\n"
+        "토스 앱이 복사해 주는 글에는 가격이 없고, 이 상품은 쉐어링크\n"
+        "대시보드 목록(117개)에도 없습니다. 토스 웹은 가격을 주지 않습니다.\n\n"
+        "가격을 넣으려면 둘 중 하나로 다시 보내 주세요.\n"
+        "  · 딜방 글을 같이 붙여넣기 (거기 최저가·할인율이 있습니다)\n"
+        "  · 직접 적기 — 예: 최저가 9,900원 88% 할인")
+    return (header, body + hint), None
 
 
 def handle_coupang(conn, text, deal_url):

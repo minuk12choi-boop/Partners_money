@@ -149,7 +149,7 @@ def send(token, chat_id, header, body):
 
 def load_pending(conn, resend=None):
     cols = ("platform, product_id, title, price, affiliate_url, "
-            "discount_pct, discount_amt")
+            "discount_pct, discount_amt, original_price")
     if resend:
         rows = conn.execute(
             f"SELECT {cols} FROM deals "
@@ -168,7 +168,8 @@ def load_pending(conn, resend=None):
              .isoformat(timespec="seconds"),)).fetchall()
     return [{"platform": r[0], "product_id": r[1], "title": r[2],
              "price": r[3], "affiliate_url": r[4],
-             "discount_pct": r[5], "discount_amt": r[6]}
+             "discount_pct": r[5], "discount_amt": r[6],
+             "original_price": r[7]}
             for r in rows if str(r[4]).startswith("http")]
 
 
@@ -253,7 +254,7 @@ def main():
             try:
                 body = build_text(r["title"], r["price"], r["affiliate_url"],
                                   r["platform"], r.get("discount_pct"),
-                                  r.get("discount_amt"))
+                                  r.get("discount_amt"), r.get("original_price"))
             except (AssertionError, ValueError) as e:
                 log(f"본문 생성 거부 [{r['platform']}:{r['product_id']}]: {e}")
                 continue
@@ -279,7 +280,7 @@ def main():
         try:
             body = build_text(r["title"], r["price"], r["affiliate_url"],
                               r["platform"], r.get("discount_pct"),
-                              r.get("discount_amt"))
+                              r.get("discount_amt"), r.get("original_price"))
         except (AssertionError, ValueError) as e:
             # 고지 문구 문제는 넘어가면 안 되는 사안이다. 보내지 않는다.
             log(f"본문 생성 거부 [{tag}]: {e}")
