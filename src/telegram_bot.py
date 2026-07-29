@@ -56,6 +56,7 @@ import kakao_deal_extract as K
 import partners_link as P
 import toss_api
 import toss_link as T
+import vision_ocr
 from lock import profile_lock, LockBusy
 
 load_env()
@@ -65,6 +66,10 @@ DB_PATH = os.path.join(HERE, "deals.db")
 OFFSET_PATH = os.path.join(HERE, "tg_offset.json")
 
 API = "https://api.telegram.org/bot{token}/{method}"
+
+# 가격을 못 구했을 때 헤더에 넣는 말. 이 표시를 보고 '사진을 기다릴지'
+# 판단하므로 헤더 문구와 반드시 같아야 한다.
+NO_PRICE = "가격 미확인"
 
 RE_TOSS_SHARE = re.compile(r"https?://toss\.im/_m/[A-Za-z0-9]+")
 RE_COUPANG_ANY = re.compile(
@@ -78,20 +83,77 @@ HELP = """무엇을 보내면 되는지 알려드릴게요.
 
 1) 내 토스 쉐어링크
    토스 앱에서 발급한 https://toss.im/_m/... 를 보내세요.
-   딜방 글을 통째로 붙여넣고 맨 아래에 내 링크를 덧붙이면
-   가격·할인율까지 같이 넣어 드립니다.
 
-2) 딜방의 쿠팡 글
+2) 상품 화면 스크린샷
+   토스 앱 상품 화면을 찍어 보내시면 상품명·판매가·정가·할인율을 읽습니다.
+   토스가 웹에서 가격을 빼 놔서, 딜방에 안 올라온 상품은 이게 유일한 방법입니다.
+
+   ※ 링크와 사진은 따로 보내셔도 됩니다. 순서도 상관없습니다.
+      15분 안에 둘 다 오면 알아서 짝을 맞춥니다.
+
+3) 딜방의 쿠팡 글
    방장 글을 통째로 복사해서 보내세요.
    방장 링크는 버리고 사장님 파트너스 링크를 새로 만들어 드립니다.
 
 ※ 딜방의 토스 글은 처리할 수 없습니다. 토스는 상품을 지정해서 링크를
    만들 방법이 없어서(PC 웹에 검색이 없음), 사장님이 앱에서 직접 발급한
-   링크가 필요합니다."""
+   링크가 필요합니다.
+
+/cancel — 기다리고 있는 사진·링크를 지웁니다."""
 
 
 def log(msg=""):
     print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
+
+
+# ------------------------------------------------------- 사진·링크 짝 맞추기
+#
+# 텔레그램에서는 사진과 링크가 **한 메시지로 오지 않는 경우가 많다.**
+# 앱에서 스크린샷을 찍고, 링크를 복사해 붙여넣는 동작이 따로이기 때문이다.
+# 게다가 순서도 그때그때 다르다. 사진이 먼저 올 수도, 링크가 먼저 올 수도 있다.
+#
+# 그래서 한쪽만 오면 버리지 않고 잠깐 들고 있다가, 나머지 한쪽이 오면
+# 짝을 지어 처리한다. 양방향 모두 된다.
+#
+# 프로세스 메모리에만 둔다. 봇을 재시작하면 기다리던 것은 사라진다.
+# 15분짜리 임시 상태를 파일로 남길 만한 가치가 없다 — 다시 보내면 그만이다.
+PAIR_WINDOW = 15 * 60
+
+_pending = {}       # chat -> {"shot": {...}|None, "text": str|None, "at": float}
+
+
+def pending_get(chat):
+    """짝을 기다리던 것을 꺼낸다. 시간이 지났으면 버린다."""
+    p = _pending.get(chat)
+    if not p:
+        return None
+    if time.time() - p["at"] > PAIR_WINDOW:
+        _pending.pop(chat, None)
+        log("기다리던 짝이 시간 초과로 버려짐")
+        return None
+    return p
+
+
+def pending_put(chat, shot=None, text=None):
+    _pending[chat] = {"shot": shot, "text": text, "at": time.time()}
+
+
+def pending_clear(chat):
+    _pending.pop(chat, None)
+
+
+def describe_shot(shot):
+    """스크린샷에서 읽은 것을 사람이 확인할 수 있게 한 줄로."""
+    bits = []
+    if shot.get("title"):
+        bits.append(shot["title"][:40])
+    if shot.get("price"):
+        bits.append(f"{shot['price']:,}원")
+    if shot.get("original_price"):
+        bits.append(f"정가 {shot['original_price']:,}원")
+    if shot.get("discount_pct"):
+        bits.append(f"{shot['discount_pct']}%")
+    return " · ".join(bits) or "읽은 값 없음"
 
 
 # ---------------------------------------------------------------- 텔레그램
@@ -115,6 +177,22 @@ def send_body(token, chat_id, header, body):
     msg = f"{html.escape(header)}\n<pre>{html.escape(body)}</pre>"
     return call("sendMessage", token, chat_id=chat_id, text=msg,
                 parse_mode="HTML", disable_web_page_preview="true")
+
+
+def download_photo(token, photos):
+    """텔레그램 사진을 내려받는다. (바이트, media_type).
+
+    `photos` 는 같은 사진의 여러 해상도다. 마지막이 가장 크다.
+    작은 것을 쓰면 글씨가 뭉개져 가격을 잘못 읽는다.
+    """
+    biggest = photos[-1]
+    info = call("getFile", token, file_id=biggest["file_id"])
+    path = info["file_path"]
+    url = f"https://api.telegram.org/file/bot{token}/{path}"
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
+    ext = os.path.splitext(path)[1].lower()
+    return r.content, vision_ocr.MEDIA_TYPES.get(ext, "image/jpeg")
 
 
 def load_offset():
@@ -203,7 +281,7 @@ def lookup_toss_price(taca_id):
         return None
 
 
-def handle_toss(conn, text, share_url):
+def handle_toss(conn, text, share_url, shot=None):
     """내 토스 쉐어링크 → 양식."""
     session = requests.Session()
     product_url, product_id = K.resolve_toss_url(share_url, session)
@@ -217,18 +295,30 @@ def handle_toss(conn, text, share_url):
     # ⚠️ 토스 웹에는 가격이 아예 없다(실측). 상품 페이지도, 카테고리
     # 랭킹도, 토스쇼핑 홈도 '원' 붙은 숫자가 0개다. RSC 페이로드와 script
     # 전체를 훑어도 없다. 토스가 앱으로 유도하려고 웹에서 뺐다.
-    # 그래서 링크를 열어 읽는 방법은 존재하지 않는다. 아래 두 곳이 전부다.
+    # 그래서 링크를 열어 읽는 방법은 존재하지 않는다. 아래가 전부다.
     price = pct = amt = original = None
     title = ""
     source = ""
 
-    # 1) 붙여넣은 텍스트 — 딜방 글을 같이 보내면 여기 다 있다
-    price = K.guess_price(text)
-    pct, amt = K.guess_discount(text)
-    if price:
-        source = "메시지"
+    # 1) 스크린샷 — 사장님이 앱에서 실제로 본 화면이다. 정가까지 들어 있어
+    #    가장 완전하고, 딜방에 안 올라온 상품도 커버하는 유일한 출처다.
+    if shot:
+        price = shot.get("price")
+        original = shot.get("original_price")
+        pct = shot.get("discount_pct")
+        title = shot.get("title") or ""
+        if price:
+            source = "스크린샷"
 
-    # 2) 이미 수집해 둔 딜 — 딜방이 올린 것이면 여기 있다. 커버리지가 가장 넓다
+    # 2) 붙여넣은 텍스트 — 딜방 글을 같이 보내면 여기 다 있다
+    if not price:
+        price = K.guess_price(text)
+        if price:
+            source = "메시지"
+    if pct is None and amt is None:
+        pct, amt = K.guess_discount(text)
+
+    # 3) 이미 수집해 둔 딜 — 딜방이 올린 것이면 여기 있다. 커버리지가 가장 넓다
     if not price:
         info = lookup_db(conn, "toss", product_id)
         if info:
@@ -236,17 +326,17 @@ def handle_toss(conn, text, share_url):
             pct = pct or info.get("discount_pct")
             amt = amt or info.get("discount_amt")
             original = info.get("original_price")
-            title = info.get("title") or ""
+            title = title or info.get("title") or ""
             source = "딜방 수집분"
 
-    # 3) 쉐어링크 대시보드 목록 — 큐레이션 117개에 있으면 정가까지 나온다
+    # 4) 쉐어링크 대시보드 목록 — 큐레이션 117개에 있으면 정가까지 나온다
     if not price:
         info = lookup_toss_price(product_id)
         if info:
             price = info.get("price")
-            original = info.get("original_price")
+            original = original or info.get("original_price")
             pct = pct or info.get("discount_pct")
-            title = info.get("title") or ""
+            title = title or info.get("title") or ""
             source = "대시보드"
 
     if not title:
@@ -270,17 +360,18 @@ def handle_toss(conn, text, share_url):
     # 링크를 열어 읽는 방법은 없다. 토스가 웹에서 가격을 통째로 뺐다.
     # 상품 페이지·카테고리 랭킹·토스쇼핑 홈 어디에도 '원' 붙은 숫자가
     # 하나도 없고, RSC 페이로드와 script 를 전부 훑어도 없다(실측).
-    header = "🛒 토스 · 가격 미확인"
+    header = f"🛒 토스 · {NO_PRICE}"
     hint = (
         "\n\n⚠️ 가격을 못 찾았습니다.\n"
         "이 상품은 딜방에도 안 올라왔고 쉐어링크 대시보드 목록에도 없습니다.\n"
         "토스는 웹에서 가격을 아예 빼 놨습니다(상품 페이지·랭킹·홈 전부).\n"
         "그래서 링크를 열어 읽어올 방법이 없습니다.\n\n"
-        "딜방 글을 같이 붙여넣어 주시면 거기 최저가·할인율이 있습니다.")
+        "📸 토스 앱 상품 화면을 캡처해서 보내 주세요. 그 사진에서\n"
+        "   상품명·판매가·정가·할인율을 읽어 채워 드립니다.")
     return (header, body + hint), None
 
 
-def handle_coupang(conn, text, deal_url):
+def handle_coupang(conn, text, deal_url, shot=None):
     """딜방 쿠팡 글 → 내 딥링크로 바꿔 양식."""
     session = requests.Session()
     product_url, product_id = K.resolve_product_url(deal_url, session)
@@ -294,6 +385,13 @@ def handle_coupang(conn, text, deal_url):
     pct, amt = K.guess_discount(text)
     original = None
 
+    # 스크린샷을 같이 보내셨으면 거기 값이 가장 정확하다. 빈 칸만 채운다.
+    if shot:
+        price = price or shot.get("price")
+        original = original or shot.get("original_price")
+        pct = pct if pct is not None else shot.get("discount_pct")
+        title = title or shot.get("title") or ""
+
     # 붙여넣은 글에 가격이 없으면(링크만 보낸 경우) 수집해 둔 딜에서 찾는다.
     if not price:
         info = lookup_db(conn, "coupang", product_id)
@@ -301,7 +399,7 @@ def handle_coupang(conn, text, deal_url):
             price = info["price"]
             pct = pct or info.get("discount_pct")
             amt = amt or info.get("discount_amt")
-            original = info.get("original_price")
+            original = original or info.get("original_price")
             title = title or info.get("title") or ""
 
     # 내 딥링크를 새로 만든다. 방장 링크는 여기서 버려진다.
@@ -331,12 +429,12 @@ def handle_coupang(conn, text, deal_url):
                       "coupang", pct, amt, original)
     save(conn, "coupang", product_id, title, price, product_url,
          my_link, text, pct, amt, original)
-    header = (f"🛒 쿠팡 · {f'{price:,}원' if price else '가격 미확인'} "
+    header = (f"🛒 쿠팡 · {f'{price:,}원' if price else NO_PRICE} "
               f"· 내 링크로 교체됨")
     return (header, body), None
 
 
-def handle_message(conn, text):
+def handle_message(conn, text, shot=None):
     """(헤더, 본문) 또는 (None, 안내문)."""
     text = (text or "").strip()
     if not text:
@@ -351,7 +449,7 @@ def handle_message(conn, text):
     # 쿠팡 링크가 있으면 그쪽이 우선이다. 우리가 내 링크를 만들 수 있으므로
     # 방장 글이어도 안전하다.
     if coupang:
-        return handle_coupang(conn, text, coupang.group(0))
+        return handle_coupang(conn, text, coupang.group(0), shot)
 
     if toss:
         # 딜방 원문에 들어 있는 토스 링크는 방장 것이다. 그대로 쓰면
@@ -366,32 +464,19 @@ def handle_message(conn, text):
                 "글에서 읽습니다.\n\n"
                 "/toss https://toss.im/_m/내링크\n"
                 "(그 아래에 딜방 글을 붙여넣기)")
-        return handle_toss(conn, text, toss.group(0))
+        return handle_toss(conn, text, toss.group(0), shot)
 
     return None, HELP
 
 
+def has_link(text):
+    return bool(RE_TOSS_SHARE.search(text or "")
+                or RE_COUPANG_ANY.search(text or ""))
+
+
 # ---------------------------------------------------------------- 메인
 
-def process(conn, token, chat_id, msg):
-    chat = str((msg.get("chat") or {}).get("id", ""))
-    text = msg.get("text") or msg.get("caption") or ""
-
-    # 사장님 대화만 받는다. 봇 주소를 아는 다른 사람이 쓰면 안 된다.
-    if chat_id and chat != str(chat_id):
-        log(f"모르는 대화 {chat} 무시")
-        return
-
-    log(f"수신: {text[:60]!r}")
-    try:
-        result, err = handle_message(conn, text)
-    except (AssertionError, ValueError) as e:
-        # 고지 문구 문제는 절대 넘어가면 안 된다.
-        result, err = None, f"본문을 만들 수 없습니다: {e}"
-    except Exception as e:
-        result, err = None, f"처리 중 오류: {e}"
-        log(f"오류: {e}")
-
+def reply(token, chat, result, err):
     if result:
         header, body = result
         send_body(token, chat, header, body)
@@ -399,6 +484,100 @@ def process(conn, token, chat_id, msg):
     else:
         send_text(token, chat, err)
         log("회신: 안내문")
+
+
+def build_and_reply(conn, token, chat, text, shot):
+    """문구를 만들어 보낸다. 가격을 못 채웠으면 True 를 돌려준다."""
+    try:
+        result, err = handle_message(conn, text, shot)
+    except (AssertionError, ValueError) as e:
+        # 고지 문구 문제는 절대 넘어가면 안 된다.
+        result, err = None, f"본문을 만들 수 없습니다: {e}"
+    except Exception as e:
+        result, err = None, f"처리 중 오류: {e}"
+        log(f"오류: {e}")
+    reply(token, chat, result, err)
+    return bool(result) and NO_PRICE in result[0]
+
+
+def process(conn, token, chat_id, msg):
+    chat = str((msg.get("chat") or {}).get("id", ""))
+    text = msg.get("text") or msg.get("caption") or ""
+    photos = msg.get("photo")
+
+    # 사장님 대화만 받는다. 봇 주소를 아는 다른 사람이 쓰면 안 된다.
+    if chat_id and chat != str(chat_id):
+        log(f"모르는 대화 {chat} 무시")
+        return
+
+    if text.strip().startswith("/cancel"):
+        pending_clear(chat)
+        send_text(token, chat, "기다리던 사진·링크를 지웠습니다.")
+        return
+
+    # ── 사진이 왔다
+    if photos:
+        log(f"수신: 사진 {len(photos)}종 · 캡션 {text[:40]!r}")
+        try:
+            data, media_type = download_photo(token, photos)
+            shot = vision_ocr.read_screenshot(data, media_type, log=log)
+        except vision_ocr.OcrUnavailable as e:
+            send_text(token, chat, f"스크린샷을 읽을 수 없습니다.\n{e}")
+            return
+        except Exception as e:
+            log(f"판독 실패: {e}")
+            send_text(token, chat, f"스크린샷 판독에 실패했습니다: {e}")
+            return
+
+        log(f"판독: {describe_shot(shot)}")
+
+        # 링크는 캡션에 있을 수도, 아까 따로 보내셨을 수도 있다.
+        pending = pending_get(chat)
+        paired = text if has_link(text) else (
+            pending["text"] if pending and pending.get("text") else None)
+
+        if paired:
+            pending_clear(chat)
+            # 캡션과 앞서 온 글을 합친다. 딜방 글을 먼저 보내고 사진을
+            # 나중에 보내는 경우, 그 글의 가격·할인율도 살려야 한다.
+            merged = paired if paired == text else f"{paired}\n{text}".strip()
+            build_and_reply(conn, token, chat, merged, shot)
+            return
+
+        # 링크가 아직 없다. 읽은 것을 들고 기다린다.
+        pending_put(chat, shot=shot, text=text or None)
+        send_text(token, chat,
+                  f"📸 읽었습니다 — {describe_shot(shot)}\n\n"
+                  "이제 이 상품의 토스 쉐어링크를 보내 주세요.\n"
+                  "(15분 안에 보내시면 이 사진과 짝을 맞춰 드립니다)")
+        return
+
+    # ── 글이 왔다
+    log(f"수신: {text[:60]!r}")
+
+    if not has_link(text):
+        # 링크가 없으면 기다리게 할 것도 없다. 안내만 한다.
+        build_and_reply(conn, token, chat, text, None)
+        return
+
+    # 앞서 사진을 보내셨으면 그걸 쓴다.
+    pending = pending_get(chat)
+    shot = pending.get("shot") if pending else None
+    extra = pending.get("text") if pending else None
+    if pending:
+        pending_clear(chat)
+    if shot:
+        log(f"앞서 온 사진과 짝지음 — {describe_shot(shot)}")
+    merged = f"{text}\n{extra}".strip() if extra else text
+
+    no_price = build_and_reply(conn, token, chat, merged, shot)
+
+    # 가격을 못 채웠다면 사장님이 곧 스크린샷을 보내실 것이다(그렇게 안내했다).
+    # 이 링크를 들고 있어야 그 사진과 짝이 맞는다. 안 들고 있으면 사진이
+    # 왔을 때 다시 "링크를 보내 주세요" 가 되어 무한히 맴돈다.
+    if no_price:
+        pending_put(chat, shot=None, text=merged)
+        log("가격 미확인 — 링크를 들고 사진을 기다린다")
 
 
 def main():
