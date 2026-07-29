@@ -830,15 +830,51 @@ python src/threads_post.py              # 실제 발행 1건
 
 ## T5. 무인 운영 전환
 
-- [ ] `python src/run_all.py --room "방이름" --once --dry-run` 통과
-- [ ] `python src/run_all.py --room "방이름" --once` 통과
-- [ ] 텔레그램 알림 설정 및 **실제로 알림이 오는지 테스트**
-      (`TG_BOT_TOKEN`, `TG_CHAT_ID` 설정 후 일부러 실패시켜 확인)
-- [ ] Windows 작업 스케줄러에 "시스템 시작 시 실행" 등록
+- [x] 텔레그램 전달 실제 동작 확인 (2026-07-29, 2건 전송)
+- [ ] `py src/run_all.py --once --dry-run` 통과
+- [ ] `py src/run_all.py --once` 통과
+- [ ] 실패 알림이 **실제로 오는지** 테스트 (일부러 실패시켜 확인)
+- [ ] Windows 작업 스케줄러 등록 (`tools/install_task.ps1`)
 - [ ] PC 재부팅 후 자동으로 살아나는지 확인
-- [ ] 토큰 갱신 크론: 50일마다 `python src/threads_post.py --refresh-token`
+- [ ] 카톡 방 창이 닫힌 상태에서 자동으로 여는지 (T1 미검증 항목)
 
 **완료 기준**: 3일 연속 무개입으로 돌아가고, `run.log`에 치명적 오류가 없음
+
+**토큰 갱신은 지금 경로에서 필요 없다.** Threads 자동 발행을 안 쓰기
+때문이다. 나중에 켜면 50일마다 `py src/threads_post.py --refresh-token`.
+
+### ⚠️ 반드시 대화형 데스크톱에서 실행해야 한다
+
+이건 설정으로 우회할 수 없다.
+
+| 이유 | 내용 |
+|---|---|
+| 카톡 자동화 | `pywinauto` 가 실제 창에 키를 보낸다. 화면이 없으면 원리적으로 불가능 |
+| 브라우저 | CLAUDE.md 제약 5 가 `headless=False` 를 요구한다 |
+
+따라서 작업 스케줄러에 **"사용자가 로그온한 경우에만 실행"**
+(`-LogonType Interactive`) 으로 등록해야 한다. "로그온 여부에 관계없이
+실행" 으로 두면 화면 없는 세션에서 돌면서 **조용히 계속 실패한다.**
+무인 운영에서 최악의 형태다. `tools/install_task.ps1` 이 이 값으로
+고정해 두었다. 바꾸지 말 것.
+
+같은 이유로:
+- PC 를 **로그인 상태로** 켜 둘 것
+- **절전을 끌 것** (설정 > 시스템 > 전원 > 화면 및 절전 → 전부 '안 함').
+  절전에 들어가면 `time.sleep()` 로 대기 중이던 주기가 멈춘다
+- **카톡 딜방 창을 열어 둘 것** (방 창 자동 열기가 아직 미검증)
+
+### 등록/해제
+
+```
+powershell -ExecutionPolicy Bypass -File tools\install_task.ps1           # 등록
+powershell -ExecutionPolicy Bypass -File tools\install_task.ps1 -Status   # 확인
+powershell -ExecutionPolicy Bypass -File tools\install_task.ps1 -Remove   # 해제
+```
+
+진입점은 `tools/run_bot.cmd` 다. 방 이름을 인자로 주지 않고 `.env` 의
+`KAKAO_ROOM` 에서 읽는다. 경로와 방 이름에 공백·한글이 섞이면 스케줄러
+인자에서 따옴표가 꼬이기 때문이다.
 
 ---
 
