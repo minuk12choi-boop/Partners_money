@@ -131,12 +131,24 @@ def cycle(room, dry_run=False):
         notify("토스 쉐어링크 세션이 만료되었습니다. toss_link.py --login 을 실행하세요.")
         results["toss_link"] = False
 
-    # 4) 스레드 발행
-    cmd = [PY, "threads_post.py"]
+    # 4) 텔레그램으로 문구 전달
+    #
+    # 예전에는 threads_post.py 로 스레드에 자동 발행했다. 소유자 결정
+    # (2026-07-29)으로 **사람이 직접 올리는** 방식으로 바꿨다. 파이프라인은
+    # '링크 + 완성된 본문' 을 텔레그램으로 보내는 데까지만 한다.
+    # Meta 앱 심사 리스크가 사라지고, 무엇을 언제 올릴지는 사람이 정한다.
+    #
+    # threads_post.py 는 지우지 않았다. 나중에 자동 발행을 켤 때 쓴다.
+    # 그쪽의 DAILY_CAP / MIN_GAP_MINUTES 도 그대로 두었다.
+    cmd = [PY, "telegram_deliver.py"]
     if dry_run:
         cmd.append("--dry-run")
-    ok, _ = run_step("스레드 발행", cmd, timeout=1800)
-    results["post"] = ok
+    ok, out = run_step("텔레그램 전달", cmd, timeout=600)
+    results["deliver"] = ok
+    if "설정이 없습니다" in out:
+        # 여기서 알림을 보내봐야 같은 채널이라 도착하지 않는다. 로그로 남긴다.
+        log("텔레그램 설정이 없습니다. TG_BOT_TOKEN / TG_CHAT_ID 를 "
+            "`.env` 에 넣으세요. `py src/telegram_deliver.py --whoami` 참고", "ERROR")
 
     return results, None
 
