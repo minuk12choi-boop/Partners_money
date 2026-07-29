@@ -26,9 +26,13 @@ import os
 import re
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+
+from env import load_env
+
+load_env()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(HERE, "deals.db")
@@ -93,6 +97,17 @@ MAX_LINKS_PER_RUN = 4
 # 사람의 행동이 아니다. 시도 횟수를 줄이고 사이에 간격을 둔다.
 MAX_DISCOVER_ATTEMPTS = 8
 SLEEP_BETWEEN = 6
+
+# 이 시간보다 오래된 딜은 링크를 만들지 않는다.
+#
+# 이 방의 딜은 선착순이고 물량이 소진되면 끝난다. 어제 딜의 링크를
+# 만들어봐야 쓰지 않는다. 그리고 **쓰지 않을 링크를 만드는 접근은
+# 순수한 손해다.** 제약 2 의 취지가 파트너스 사이트 접근 최소화인데,
+# DB 에 쌓인 300건 넘는 예전 딜을 주기마다 4건씩 소화하면 하루 100번 넘게
+# 접근하면서 정작 그 링크는 아무도 안 쓴다.
+#
+# 이 필터를 넣으면 신규 딜이 없는 주기에는 접근이 0회다.
+MAX_DEAL_AGE_HOURS = int(os.environ.get("MAX_DEAL_AGE_HOURS", "12"))
 # ─────────────────────────────────────────────────────────────────
 
 # 페이지 안의 모든 input/textarea 후보를 뽑고 점수를 매기는 JS
@@ -480,14 +495,23 @@ def do_run(limit):
     # 쿠팡 딜만 가져온다. 이 스크립트는 쿠팡 파트너스 페이지를 쓰므로
     # 토스 상품 URL 을 넣으면 엉뚱한 링크가 만들어지거나 실패한다.
     # 토스는 쉐어링크 대시보드를 써야 한다(docs/toss_sharelink.md).
+    cutoff = (datetime.now() - timedelta(hours=MAX_DEAL_AGE_HOURS)
+              ).isoformat(timespec="seconds")
     rows = conn.execute(
         "SELECT product_id, title, product_url FROM deals "
         "WHERE platform = 'coupang' AND affiliate_url IS NULL AND posted_at IS NULL "
-        "ORDER BY found_at DESC LIMIT ?", (limit,)
+        "AND found_at >= ? "
+        "ORDER BY found_at DESC LIMIT ?", (cutoff, limit)
     ).fetchall()
 
     if not rows:
-        log("변환할 항목 없음")
+        # 왜 0건인지 알 수 있게 남긴다. 조용한 0건은 조용한 정지와 구분이 안 된다.
+        stale = conn.execute(
+            "SELECT COUNT(*) FROM deals WHERE platform='coupang' "
+            "AND affiliate_url IS NULL AND found_at < ?", (cutoff,)).fetchone()[0]
+        log(f"변환할 신규 항목 없음 "
+            f"(최근 {MAX_DEAL_AGE_HOURS}시간 내 미처리 0건, "
+            f"그보다 오래된 것 {stale}건은 건너뜀)")
         conn.close()
         return 0, 0
 

@@ -78,23 +78,35 @@ DAILY_CAP = 5            # API 한도(250)가 아니라 스팸 판정 방지용 
 MIN_GAP_MINUTES = 90     # 발행 간 최소 간격
 # ─────────────────────────────────────────────────────────────────
 
-# 쿠팡: 고지를 본문 끝에 둔다
-TEMPLATES = [
-    "{title}\n\n{price_line}가격 확인해보세요 👉 {url}\n\n{disclosure}",
-    "{title}\n{price_line}\n{url}\n\n{disclosure}",
-    "이거 지금 {price_line}이네요.\n\n{title}\n{url}\n\n{disclosure}",
-]
-
-# 토스: 고지를 반드시 맨 앞에 둔다. 순서를 바꾸지 말 것.
-TOSS_TEMPLATES = [
-    "{disclosure}\n\n{title}\n\n{price_line}가격 확인해보세요 👉 {url}",
-    "{disclosure}\n\n{title}\n{price_line}\n{url}",
-]
-
-TEMPLATES_BY_PLATFORM = {
-    "coupang": TEMPLATES,
-    "toss": TOSS_TEMPLATES,
-}
+# ── 본문 양식 ─────────────────────────────────────────────────────
+#
+# 딜방 방장의 양식을 참고해 다시 만든 것이다(소유자 지시 2026-07-29).
+# 방장 양식이 정보 배치가 좋아서 뼈대는 같이 가되, 이모지와 문구는 바꿨다.
+#
+# ⚠️ **고지 문구는 방장 것을 따라 쓰지 않는다.**
+# 방장은 '쿠팡 파트너스를 통해 수수료를 받습니다.' 라는 축약형을 쓰는데,
+# 쿠팡이 지정한 필수 문구는 그게 아니다(링크 생성 화면 실측).
+# 공정위 심사지침이 걸린 문구라 정식 문구를 한 글자도 바꾸지 않고 쓴다.
+#
+# 두 플랫폼 모두 고지를 **맨 앞**에 둔다.
+#  - 토스는 운영정책이 '첫 부분' 을 요구한다 (필수)
+#  - 쿠팡은 위치 규정이 없다. 맨 앞이 더 눈에 띄므로 안전한 쪽이고,
+#    양쪽 양식을 같게 유지할 수 있다
+#
+# 가격/할인 줄은 값이 있을 때만 들어간다. 없는 값을 지어내지 않는다.
+BODY_TEMPLATE = (
+    "{disclosure}\n"
+    "\n"
+    "🛍️ {title}\n"
+    "{price_block}"
+    "\n"
+    "👉 구매하러 가기\n"
+    "{url}\n"
+    "\n"
+    "💳 카드할인·쿠폰 적용가 기준\n"
+    "📊 가격은 수시로 바뀔 수 있어요\n"
+    "⚡ 물량이 빠르게 소진될 수 있습니다"
+)
 
 
 # ---------------------------------------------------------------- 토큰
@@ -130,42 +142,59 @@ def refresh_token():
 
 # ---------------------------------------------------------------- 문구 생성
 
-def build_text(title, price, url, platform="coupang"):
-    """플랫폼에 맞는 고지 문구와 배치로 본문을 만든다.
+def build_price_block(price, discount_pct=None, discount_amt=None):
+    """가격·할인 줄. 값이 있을 때만 만든다.
 
-    쿠팡은 본문 끝, 토스는 반드시 맨 앞에 고지가 와야 한다.
+    할인 정보는 딜방 메시지에서 파싱한 방장의 표기를 그대로 쓴다.
+    평균가를 우리가 다시 계산하지 않는다 — 평균가 = 최저가 + 할인액 이라
+    새로 얻을 정보가 없고, 없는 값을 지어내면 틀린 가격을 내보내게 된다.
+    """
+    if not price:
+        return ""
+    lines = [f"\n💥 최저가 {price:,}원"]
+    if discount_amt and discount_pct:
+        lines.append(f"↳ 평균가 대비 {discount_amt:,}원 ↓ ({discount_pct}%)")
+    elif discount_pct:
+        lines.append(f"↳ {discount_pct}% 할인")
+    elif discount_amt:
+        lines.append(f"↳ 평균가 대비 {discount_amt:,}원 ↓")
+    return "\n".join(lines) + "\n"
+
+
+def build_text(title, price, url, platform="coupang",
+               discount_pct=None, discount_amt=None):
+    """플랫폼에 맞는 고지 문구로 본문을 만든다.
+
+    두 플랫폼 모두 고지를 맨 앞에 둔다. 토스는 운영정책이 '첫 부분' 을
+    요구하고, 쿠팡은 위치 규정이 없어 더 눈에 띄는 쪽으로 맞췄다.
     두 문구를 섞어 쓰면 양쪽 정책을 다 어긴다.
     """
     disclosure = DISCLOSURES.get(platform)
-    templates = TEMPLATES_BY_PLATFORM.get(platform)
-    if disclosure is None or templates is None:
+    if disclosure is None:
         raise ValueError(f"알 수 없는 플랫폼: {platform!r} — 고지 문구를 정할 수 없어 중단합니다")
 
-    price_line = f"{price:,}원 " if price else ""
-    tpl = random.choice(templates)
-    body = tpl.format(title=title.strip(), price_line=price_line,
-                      url=url.strip(), disclosure=disclosure)
-    body = re.sub(r"\n{3,}", "\n\n", body).strip()
+    def render(t):
+        body = BODY_TEMPLATE.format(
+            title=t.strip(), url=url.strip(), disclosure=disclosure,
+            price_block=build_price_block(price, discount_pct, discount_amt))
+        return re.sub(r"\n{3,}", "\n\n", body).strip()
 
-    # 500자 초과 시 제목 쪽을 줄인다. 고지 문구는 절대 자르지 않는다.
+    body = render(title)
+
+    # 500자 초과 시 제목 쪽을 줄인다. 고지 문구와 링크는 절대 자르지 않는다.
     if len(body) > MAX_CHARS:
         over = len(body) - MAX_CHARS + 1
-        title = title[: max(10, len(title) - over)] + "…"
-        body = tpl.format(title=title, price_line=price_line,
-                          url=url.strip(), disclosure=disclosure)
-        body = re.sub(r"\n{3,}", "\n\n", body).strip()
-        # 잘라낼 때도 고지가 살아남아야 한다.
-        # 토스는 고지가 맨 앞이라 뒤에서 자르고, 쿠팡은 맨 뒤라 앞에서 자른다.
-        if len(body) > MAX_CHARS:
-            body = body[:MAX_CHARS] if platform == "toss" else body[-MAX_CHARS:]
+        body = render(title[: max(10, len(title) - over)] + "…")
 
     assert disclosure in body, f"[{platform}] 고지 문구가 누락됨 — 발행 중단"
     # 다른 플랫폼의 고지가 섞이면 양쪽 다 위반이다.
     for other, text in DISCLOSURES.items():
         if other != platform:
             assert text not in body, f"[{platform}] 다른 플랫폼({other}) 고지가 섞임 — 발행 중단"
-    if platform == "toss":
-        assert body.startswith(disclosure), "토스 고지는 첫 부분에 와야 함 — 발행 중단"
+    # 두 플랫폼 모두 맨 앞이다. 토스는 정책상 필수, 쿠팡은 우리 규칙.
+    assert body.startswith(disclosure), f"[{platform}] 고지는 첫 부분에 와야 함 — 발행 중단"
+    # 링크가 잘려 나가면 아무 쓸모가 없다.
+    assert url.strip() in body, f"[{platform}] 링크가 누락됨 — 발행 중단"
     return body
 
 
@@ -221,12 +250,14 @@ def load_ready_rows(conn):
     CLAUDE.md 가 "모든 상태는 deals.db 에 저장한다" 고 못 박은 이유다.
     """
     rows = conn.execute(
-        "SELECT platform, product_id, title, price, affiliate_url FROM deals "
+        "SELECT platform, product_id, title, price, affiliate_url, "
+        "discount_pct, discount_amt FROM deals "
         "WHERE affiliate_url IS NOT NULL AND affiliate_url != '' "
         "AND posted_at IS NULL ORDER BY found_at DESC"
     ).fetchall()
     return [{"platform": r[0], "product_id": r[1], "title": r[2],
-             "price": r[3], "affiliate_url": r[4]}
+             "price": r[3], "affiliate_url": r[4],
+             "discount_pct": r[5], "discount_amt": r[6]}
             for r in rows if str(r[4]).startswith("http")]
 
 
@@ -266,7 +297,9 @@ def main():
         for r in rows[: args.cap]:
             print("─" * 50)
             print(f"[{r['platform']}:{r['product_id']}]")
-            print(build_text(r["title"], r["price"], r["affiliate_url"], r["platform"]))
+            print(build_text(r["title"], r["price"], r["affiliate_url"],
+                             r["platform"], r.get("discount_pct"),
+                             r.get("discount_amt")))
         print("─" * 50)
         conn.close()
         return
@@ -288,7 +321,9 @@ def main():
             continue
 
         try:
-            text = build_text(r["title"], r["price"], r["affiliate_url"], r["platform"])
+            text = build_text(r["title"], r["price"], r["affiliate_url"],
+                              r["platform"], r.get("discount_pct"),
+                              r.get("discount_amt"))
         except (AssertionError, ValueError) as e:
             # 고지 문구 문제는 넘어가면 안 되는 사안이다. 건너뛰고 로그에 남긴다.
             print(f"본문 생성 거부 [{r['platform']}:{r['product_id']}]: {e}")

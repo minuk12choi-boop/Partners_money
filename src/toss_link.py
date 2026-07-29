@@ -36,6 +36,11 @@ from datetime import datetime
 
 from playwright.sync_api import sync_playwright
 
+from env import load_env
+from schema import ensure_deals
+
+load_env()
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 DB_PATH = os.path.join(HERE, "deals.db")
@@ -338,24 +343,13 @@ def resolve_product_id(page, sharelink):
 # ---------------------------------------------------------------- DB
 
 def ensure_schema(conn):
-    """kakao_deal_extract.py 와 같은 스키마를 쓴다."""
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS deals (
-            platform     TEXT NOT NULL DEFAULT 'coupang',
-            product_id   TEXT NOT NULL,
-            title        TEXT,
-            price        INTEGER,
-            source_url   TEXT,
-            product_url  TEXT,
-            raw_message  TEXT,
-            chat_time    TEXT,
-            found_at     TEXT,
-            affiliate_url TEXT,
-            posted_at    TEXT,
-            PRIMARY KEY (platform, product_id)
-        )
-    """)
-    conn.commit()
+    """스키마는 schema.py 가 단일 출처다.
+
+    예전에는 여기에 CREATE TABLE 을 복붙해 두었는데, 컬럼이 추가될 때마다
+    조용히 어긋났다. 어느 스크립트가 먼저 실행될지 정해져 있지 않으므로
+    이 파일이 옛 스키마로 테이블을 만들어 버리면 다른 스크립트가 죽는다.
+    """
+    ensure_deals(conn)
 
 
 def already_known(conn, product_id):
@@ -366,16 +360,20 @@ def already_known(conn, product_id):
 
 def save_deal(conn, product_id, card, sharelink):
     now = datetime.now().isoformat(timespec="seconds")
+    # 대시보드가 특가율을 직접 준다. 딜방 메시지를 파싱해 얻는 값과 같은
+    # 성격이므로 같은 컬럼에 넣는다. 발행 문구가 이걸 쓴다.
+    # 할인액은 대시보드에 없다. 없는 값을 지어내지 않는다.
     conn.execute(
         "INSERT OR REPLACE INTO deals (platform,product_id,title,price,source_url,"
-        "product_url,raw_message,chat_time,found_at,affiliate_url,posted_at) "
-        "VALUES ('toss',?,?,?,?,?,?,?,?,?,NULL)",
+        "product_url,raw_message,chat_time,found_at,affiliate_url,posted_at,"
+        "discount_pct,discount_amt) "
+        "VALUES ('toss',?,?,?,?,?,?,?,?,?,NULL,?,NULL)",
         (product_id, card["title"], card.get("price"),
          PRODUCTS_URL, f"https://toss.shopping/t/{product_id}",
          # 딜방이 아니라 대시보드에서 온 건이라는 걸 남긴다
          f"쉐어링크 대시보드 · {card.get('salePct')}% 특가 · "
          f"개당 {card.get('reward')}원 수익 · 평점 {card.get('rating')}",
-         now, now, sharelink),
+         now, now, sharelink, card.get("salePct")),
     )
     conn.commit()
 

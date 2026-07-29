@@ -36,9 +36,27 @@ LOG_PATH = os.path.join(HERE, "run.log")
 STATUS_PATH = os.path.join(HERE, "status.json")
 EXPORT_PATH = os.path.join(HERE, "export.txt")
 
-CYCLE_MINUTES = 45          # 이 주기로 한 바퀴 돈다
+# ── 주기 ──────────────────────────────────────────────────────────
+# 이 방의 딜은 선착순이고 물량이 소진되면 끝난다. 45분마다 확인하면
+# 이미 늦는다. 5분으로 줄여 실시간에 가깝게 잡는다(소유자 지시 2026-07-29).
+#
+# ⚠️ 주기를 줄여도 파트너스 접근이 늘지 않는다. 오히려 줄어든다.
+# 링크 생성 쪽에 MAX_DEAL_AGE_HOURS 필터가 있어서 **신규 딜이 없는 주기에는
+# 접근이 0회**다. 예전에는 필터가 없어 DB 에 쌓인 300건 넘는 옛 딜을
+# 주기마다 4건씩 소화하며 하루 100번 넘게 접근했다. 그 링크는 아무도 안 썼다.
+# CLAUDE.md 제약 2 는 그대로 지킨다 — MAX_LINKS_PER_CYCLE 과 사이 대기 6초는
+# 손대지 않았다.
+#
+# 한 바퀴는 신규 딜이 없으면 카톡 내보내기(약 30초) + 딜 추출뿐이라 짧다.
+CYCLE_MINUTES = int(os.environ.get("CYCLE_MINUTES", "5"))
 MAX_LINKS_PER_CYCLE = 4     # 파트너스 접근 횟수. 낮게 유지할 것.
 CONSECUTIVE_FAIL_ALERT = 2  # 이만큼 연속 실패하면 알림
+
+# 토스는 몇 주기마다 한 번만 돌린다.
+# 토스는 딜방이 아니라 대시보드 목록에서 상품을 고르므로 5분마다 새로 볼
+# 것이 없다. 매 주기 4건씩 발급하면 118개짜리 목록을 두어 시간에 다 긁는다.
+# 기본값은 CYCLE_MINUTES=5 기준으로 약 1시간에 한 번이다.
+TOSS_EVERY_N_CYCLES = int(os.environ.get("TOSS_EVERY_N_CYCLES", "12"))
 
 
 def log(msg, level="INFO"):
@@ -91,7 +109,7 @@ def run_step(name, cmd, timeout=900):
     return True, out
 
 
-def cycle(room, dry_run=False):
+def cycle(room, dry_run=False, cycle_no=0):
     """한 바퀴. 각 단계는 앞 단계가 실패해도 가능한 만큼 진행한다."""
     results = {}
 
@@ -122,14 +140,24 @@ def cycle(room, dry_run=False):
 
     # 3-2) 토스 쉐어링크 발급
     # 쿠팡과 독립이다. 한쪽이 실패해도 다른 쪽은 계속 돈다.
-    # 토스는 딜방이 아니라 쉐어링크 대시보드 목록에서 상품을 고른다.
-    ok, out = run_step("토스 쉐어링크 발급",
-                       [PY, "toss_link.py", "--limit", str(MAX_LINKS_PER_CYCLE)],
-                       timeout=900)
-    results["toss_link"] = ok
-    if "세션 만료" in out:
-        notify("토스 쉐어링크 세션이 만료되었습니다. toss_link.py --login 을 실행하세요.")
-        results["toss_link"] = False
+    #
+    # ⚠️ 토스는 딜방이 아니라 쉐어링크 대시보드 목록에서 상품을 고른다.
+    # 그래서 주기가 짧아져도 새로 볼 것이 없다. 대시보드는 5분마다 바뀌지
+    # 않는다. 매 주기마다 4건씩 발급하면 118개짜리 목록을 두어 시간 만에
+    # 다 긁어버린다. 쿠팡과 달리 신선도 필터로 걸러지지도 않는다.
+    # 그래서 주기 자체를 띄운다.
+    if cycle_no % TOSS_EVERY_N_CYCLES == 0:
+        ok, out = run_step("토스 쉐어링크 발급",
+                           [PY, "toss_link.py", "--limit", str(MAX_LINKS_PER_CYCLE)],
+                           timeout=900)
+        results["toss_link"] = ok
+        if "세션 만료" in out:
+            notify("토스 쉐어링크 세션이 만료되었습니다. toss_link.py --login 을 실행하세요.")
+            results["toss_link"] = False
+    else:
+        # 건너뛴 주기를 실패로 세면 안 된다. 핵심 실패 판정에 쓰인다.
+        results["toss_link"] = True
+        log(f"── 토스 쉐어링크 발급 (건너뜀: {TOSS_EVERY_N_CYCLES}주기마다 실행)")
 
     # 4) 텔레그램으로 문구 전달
     #
@@ -172,12 +200,15 @@ def main():
             "  이모지는 넣지 마세요. 콘솔 인코딩 문제가 생깁니다(T1 관측).")
 
     log("=" * 55)
-    log(f"시작. 방='{args.room}' 주기={args.cycle}분 dry_run={args.dry_run}")
+    log(f"시작. 방='{args.room}' 주기={args.cycle}분 dry_run={args.dry_run} "
+        f"(토스는 {TOSS_EVERY_N_CYCLES}주기마다)")
     fails = 0
+    cycle_no = 0
 
     while True:
         try:
-            results, err = cycle(args.room, args.dry_run)
+            results, err = cycle(args.room, args.dry_run, cycle_no)
+            cycle_no += 1
             write_status(last_cycle=results, error=err, consecutive_fails=fails)
 
             # 쿠팡과 토스 중 한쪽이라도 링크가 나오면 파이프라인은 살아 있다.

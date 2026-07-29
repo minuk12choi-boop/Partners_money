@@ -28,6 +28,8 @@ import time
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
+from schema import BASE_SCHEMA, ensure_deals
+
 try:
     import requests
 except ImportError:
@@ -91,22 +93,8 @@ def detect_platform(url):
 
 # ---------------------------------------------------------------- DB
 
-DEALS_SCHEMA = """
-    CREATE TABLE IF NOT EXISTS deals (
-        platform     TEXT NOT NULL DEFAULT 'coupang',
-        product_id   TEXT NOT NULL,
-        title        TEXT,
-        price        INTEGER,
-        source_url   TEXT,
-        product_url  TEXT,
-        raw_message  TEXT,
-        chat_time    TEXT,
-        found_at     TEXT,
-        affiliate_url TEXT,
-        posted_at    TEXT,
-        PRIMARY KEY (platform, product_id)
-    )
-"""
+# 스키마 정의는 schema.py 가 단일 출처다. 여기서 다시 적지 않는다.
+DEALS_SCHEMA = BASE_SCHEMA
 
 
 def migrate_deals(conn):
@@ -140,6 +128,7 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     conn.execute(DEALS_SCHEMA)
     migrate_deals(conn)
+    ensure_deals(conn)
     # 해석 실패한 단축링크도 기억해서 매번 재시도하지 않게
     conn.execute("""
         CREATE TABLE IF NOT EXISTS seen_urls (
@@ -229,6 +218,45 @@ def guess_title(msg, url):
 RE_PRICE_LOWEST = re.compile(r"최저가\s*([0-9][0-9,]{2,})\s*원?")
 # 이 표현이 들어간 줄의 금액은 가격이 아니라 '할인액'이다
 RE_DISCOUNT_LINE = re.compile(r"평균가\s*대비|할인가?\s*$|정가|원가")
+
+# 할인 정보. 이 방은 플랫폼마다 다르게 적는다(실측 348건).
+#
+#   쿠팡: ↳ 평균가 대비 🔻 15,902원 🔻 38%    할인액 + 할인율
+#   토스: ↳ 🔻 60% 할인                      할인율만
+#
+# **평균가를 따로 구할 필요가 없다.** 평균가 = 최저가 + 할인액 이다.
+# 검산: 25,810 + 15,902 = 41,712 이고 15,902/41,712 = 38.1% 로 표기된 38% 와
+# 일치한다. 방장이 평균가를 어디서 얻는지는 알 필요가 없다. 이미 계산해
+# 적어 둔 값을 읽기만 하면 된다.
+#
+# 커버리지(348건): 역대 최저가 91% / 할인율 89% / 평균가 대비 59%
+RE_DISCOUNT_AMT = re.compile(r"평균가\s*대비[^\d]{0,12}([0-9][0-9,]{2,})\s*원")
+RE_DISCOUNT_PCT = re.compile(r"([0-9]{1,3})\s*%")
+
+
+def guess_discount(msg):
+    """(할인율 %, 할인액 원). 못 찾으면 각각 None.
+
+    할인 관련 줄에서만 찾는다. 상품명에 '20%' 같은 게 들어 있어도
+    엉뚱한 값을 집지 않게 하기 위함이다.
+    """
+    pct = amt = None
+    for line in msg.split("\n"):
+        if not ("평균가" in line or "할인" in line or "🔻" in line):
+            continue
+        if amt is None:
+            m = RE_DISCOUNT_AMT.search(line)
+            if m:
+                v = int(m.group(1).replace(",", ""))
+                if 100 <= v <= 50_000_000:
+                    amt = v
+        if pct is None:
+            m = RE_DISCOUNT_PCT.search(line)
+            if m:
+                v = int(m.group(1))
+                if 1 <= v <= 99:
+                    pct = v
+    return pct, amt
 
 
 def guess_price(msg):
@@ -457,14 +485,17 @@ def ingest(txt_path, resolve=True, sleep=1.2):
                     title = og
                 time.sleep(sleep)
             price = guess_price(msg["msg"])
+            disc_pct, disc_amt = guess_discount(msg["msg"])
 
             conn.execute(
                 "INSERT INTO deals (platform,product_id,title,price,source_url,"
-                "product_url,raw_message,chat_time,found_at,affiliate_url,posted_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,NULL,NULL)",
+                "product_url,raw_message,chat_time,found_at,affiliate_url,posted_at,"
+                "discount_pct,discount_amt) "
+                "VALUES (?,?,?,?,?,?,?,?,?,NULL,NULL,?,?)",
                 (platform, product_id, title, price, url, product_url,
                  msg["msg"][:2000], msg["when"],
-                 datetime.now().isoformat(timespec="seconds")),
+                 datetime.now().isoformat(timespec="seconds"),
+                 disc_pct, disc_amt),
             )
             conn.commit()
             new_count += 1

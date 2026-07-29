@@ -36,11 +36,12 @@ import os
 import sqlite3
 import sys
 import time
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 import requests
 
 from env import load_env
+from schema import ensure_deals
 from threads_post import build_text   # 고지 문구 규칙의 단일 출처
 
 load_env()
@@ -52,6 +53,17 @@ API = "https://api.telegram.org/bot{token}/{method}"
 
 # 한 번에 너무 많이 보내면 텔레그램이 막는다. 초당 여러 건은 피한다.
 SLEEP_BETWEEN = 1.5
+
+# 이 시간보다 오래된 딜은 보내지 않는다.
+#
+# 이 방의 딜은 **선착순이고 물량이 소진되면 끝난다.** 하루 지난 딜을
+# 보내는 것은 도움이 안 되고, 이미 품절된 링크를 올리면 신뢰만 잃는다.
+#
+# 실용적인 효과가 하나 더 있다. 이 필터가 없으면 DB 에 쌓인 300건 넘는
+# 예전 딜이 주기마다 8건씩 링크로 만들어져 텔레그램을 덮는다. 쓰지도 않을
+# 링크를 만드느라 파트너스 사이트에 접근하는 것은 CLAUDE.md 제약 2 의
+# 취지에도 어긋난다. 신선한 것만 처리하면 접근 횟수가 오히려 줄어든다.
+MAX_DEAL_AGE_HOURS = int(os.environ.get("MAX_DEAL_AGE_HOURS", "12"))
 
 PLATFORM_LABEL = {"coupang": "쿠팡", "toss": "토스"}
 
@@ -135,35 +147,28 @@ def send(token, chat_id, header, body):
 
 # ---------------------------------------------------------------- DB
 
-def ensure_sent_column(conn):
-    """`sent_at` 컬럼을 추가한다.
-
-    `posted_at` 을 재사용하지 않는다. '텔레그램으로 보냈다' 와 '스레드에
-    올라갔다' 는 다른 사실이고, 후자는 프로그램이 알 수 없다. 섞어 두면
-    나중에 자동 발행을 켤 때 이미 올라간 것처럼 보여 건너뛴다.
-    """
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(deals)")]
-    if "sent_at" in cols:
-        return
-    log("deals 테이블에 sent_at 컬럼을 추가합니다...")
-    conn.execute("ALTER TABLE deals ADD COLUMN sent_at TEXT")
-    conn.commit()
-
-
 def load_pending(conn, resend=None):
+    cols = ("platform, product_id, title, price, affiliate_url, "
+            "discount_pct, discount_amt")
     if resend:
         rows = conn.execute(
-            "SELECT platform, product_id, title, price, affiliate_url FROM deals "
+            f"SELECT {cols} FROM deals "
             "WHERE product_id = ? AND affiliate_url IS NOT NULL "
             "AND affiliate_url != ''", (resend,)).fetchall()
     else:
+        # 오래된 딜은 보내지 않는다. 핫딜은 선착순이라 이미 소진됐을 가능성이
+        # 높고, 늦게 올리면 신뢰만 잃는다. found_at 기준이다.
         rows = conn.execute(
-            "SELECT platform, product_id, title, price, affiliate_url FROM deals "
+            f"SELECT {cols} FROM deals "
             "WHERE affiliate_url IS NOT NULL AND affiliate_url != '' "
             "AND sent_at IS NULL AND posted_at IS NULL "
-            "ORDER BY found_at DESC").fetchall()
+            "AND found_at >= ? "
+            "ORDER BY found_at DESC",
+            ((datetime.now() - timedelta(hours=MAX_DEAL_AGE_HOURS))
+             .isoformat(timespec="seconds"),)).fetchall()
     return [{"platform": r[0], "product_id": r[1], "title": r[2],
-             "price": r[3], "affiliate_url": r[4]}
+             "price": r[3], "affiliate_url": r[4],
+             "discount_pct": r[5], "discount_amt": r[6]}
             for r in rows if str(r[4]).startswith("http")]
 
 
@@ -215,7 +220,7 @@ def main():
         sys.exit(0 if do_whoami(token) else 1)
 
     conn = sqlite3.connect(DB_PATH)
-    ensure_sent_column(conn)
+    ensure_deals(conn)
     rows = load_pending(conn, args.resend)
 
     if not rows:
@@ -246,8 +251,9 @@ def main():
     if args.dry_run:
         for i, r in enumerate(rows, 1):
             try:
-                body = build_text(r["title"], r["price"],
-                                  r["affiliate_url"], r["platform"])
+                body = build_text(r["title"], r["price"], r["affiliate_url"],
+                                  r["platform"], r.get("discount_pct"),
+                                  r.get("discount_amt"))
             except (AssertionError, ValueError) as e:
                 log(f"본문 생성 거부 [{r['platform']}:{r['product_id']}]: {e}")
                 continue
@@ -271,8 +277,9 @@ def main():
     for i, r in enumerate(rows, 1):
         tag = f"{r['platform']}:{r['product_id']}"
         try:
-            body = build_text(r["title"], r["price"],
-                              r["affiliate_url"], r["platform"])
+            body = build_text(r["title"], r["price"], r["affiliate_url"],
+                              r["platform"], r.get("discount_pct"),
+                              r.get("discount_amt"))
         except (AssertionError, ValueError) as e:
             # 고지 문구 문제는 넘어가면 안 되는 사안이다. 보내지 않는다.
             log(f"본문 생성 거부 [{tag}]: {e}")
