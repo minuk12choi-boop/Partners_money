@@ -197,25 +197,77 @@ def check_room(r):
     r.add(OK, "KAKAO_ROOM", room)
 
 
-def check_sessions(r):
-    """로그인 세션(브라우저 프로필)이 있는지.
+COUPANG_FIX = ("py src/partners_link.py --login\n"
+               "※ 로그인할 때 '자동 로그인' 을 반드시 켜세요(실측). 안 켜면 "
+               "세션이 몇 시간 만에 끊깁니다.")
+TOSS_FIX = "py src/toss_link.py --login"
 
-    프로필 디렉터리가 있다고 로그인이 살아 있다는 뜻은 아니다. 실제
-    확인은 브라우저를 띄워야 하는데, 그건 시작할 때마다 하기엔 무겁다.
-    여기서는 '한 번이라도 로그인한 적이 있는가' 만 본다.
+
+def _probe(name, mod, fix, r):
+    """실제로 접속해 로그인이 살아 있는지 본다.
+
+    프로필 디렉터리는 모듈에서 가져온다. 여기에 경로를 또 적으면
+    나중에 한쪽만 바뀌었을 때 엉뚱한 폴더를 보고 초록을 준다.
     """
-    for name, path, fix in (
-        ("쿠팡 파트너스 세션", os.path.join(HERE, "pw_profile"),
-         "py src/partners_link.py --login\n"
-         "※ 로그인할 때 '자동 로그인' 을 반드시 켜세요(실측). 안 켜면 "
-         "세션이 몇 시간 만에 끊깁니다."),
-        ("토스 쉐어링크 세션", os.path.join(ROOT, "pw_toss_profile"),
-         "py src/toss_link.py --login"),
-    ):
+    from lock import profile_lock, LockBusy
+    path = mod.PROFILE_DIR
+    if not (os.path.isdir(path) and os.listdir(path)):
+        r.add(FAIL, name, "로그인한 적이 없습니다", fix)
+        return
+
+    try:
+        # 다른 작업이 쓰는 중이면 기다리지 않는다. 점검이 멈추면 안 된다.
+        with profile_lock(path, timeout=0, log=lambda *a: None):
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as pw:
+                ctx = mod.open_context(pw)
+                try:
+                    page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                    alive = mod.session_alive(page)
+                finally:
+                    ctx.close()
+    except LockBusy:
+        # 폴더는 있는데 지금은 확인을 못 했다. 모른다고 말한다.
+        r.add(WARN, name, "다른 작업이 브라우저를 쓰는 중이라 확인 못 함")
+        return
+    except Exception as e:
+        r.add(WARN, name, f"확인 실패: {str(e)[:60]}", fix)
+        return
+
+    if alive:
+        r.add(OK, name, "살아 있음")
+    else:
+        r.add(FAIL, name, "만료됐습니다", fix)
+
+
+def check_sessions(r, deep=True):
+    """로그인 세션이 **지금** 살아 있는지.
+
+    ⚠️ 예전에는 프로필 디렉터리가 비어 있지 않은지만 봤다. 그러면 세션이
+    만료돼도 [OK] 가 나온다. 실제로 그런 일이 있었다(2026-08-01 관측):
+    doctor 는 '토스 쉐어링크 세션 [OK]' 인데 `toss_link.py --dry-run` 은
+    '세션 만료' 였다.
+
+    **점검이 거짓 초록을 주면 없느니만 못하다.** 무인 운영에서 최악은
+    조용히 멈추는 것인데, 그때 원인을 알려주라고 있는 게 이 파일이다.
+    그래서 몇 초를 더 쓰더라도 실제로 접속해 본다.
+
+    `--quick` 을 주면 폴더만 본다. 그때는 '확인 안 함' 이라고 분명히
+    적는다. 살아 있다고 말하지 않는다.
+    """
+    import partners_link
+    import toss_link
+
+    for name, mod, fix in (("쿠팡 파트너스 세션", partners_link, COUPANG_FIX),
+                           ("토스 쉐어링크 세션", toss_link, TOSS_FIX)):
+        if deep:
+            _probe(name, mod, fix, r)
+            continue
+        path = mod.PROFILE_DIR
         if os.path.isdir(path) and os.listdir(path):
-            r.add(OK, name)
+            r.add(WARN, name, "로그인한 적은 있음 (--quick: 살아 있는지 확인 안 함)")
         else:
-            r.add(WARN, name, "로그인한 적이 없습니다", fix)
+            r.add(FAIL, name, "로그인한 적이 없습니다", fix)
 
 
 def check_locks(r):
@@ -298,11 +350,18 @@ def check_db(r):
 
 # ---------------------------------------------------------------- 메인
 
-def run(quiet=False):
-    """(실패 수, 경고 수) 를 돌려준다."""
+def run(quiet=False, deep=True):
+    """(실패 수, 경고 수) 를 돌려준다.
+
+    `deep=True` 면 두 사이트에 실제로 접속해 세션이 살아 있는지 본다.
+    브라우저가 두 번 뜨고 20초쯤 걸리지만, 그러지 않으면 만료된 세션에
+    초록을 줘 버린다(2026-08-01 실측).
+    """
     if not quiet:
         print("─" * 60)
-        print("점검을 시작합니다.")
+        print("점검을 시작합니다." +
+              ("  (세션은 실제로 접속해 확인합니다 — 20초쯤 걸립니다)"
+               if deep else "  (--quick: 세션은 확인하지 않습니다)"))
         print("─" * 60)
     r = Report()
     check_env(r)
@@ -311,7 +370,7 @@ def run(quiet=False):
     bot = check_telegram(r)
     check_recipients(r, bot)
     check_room(r)
-    check_sessions(r)
+    check_sessions(r, deep=deep)
     check_kakao(r)
     check_locks(r)
     check_db(r)
@@ -328,8 +387,13 @@ def run(quiet=False):
 
 
 def main():
+    import argparse
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    failed, _ = run()
+    ap = argparse.ArgumentParser(description="무엇이 막고 있는지 한 번에 본다")
+    ap.add_argument("--quick", action="store_true",
+                    help="세션을 실제로 확인하지 않는다(브라우저를 안 띄운다)")
+    args = ap.parse_args()
+    failed, _ = run(deep=not args.quick)
     sys.exit(1 if failed else 0)
 
 

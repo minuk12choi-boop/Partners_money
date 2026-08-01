@@ -218,6 +218,15 @@ def goto_products(page):
     return not needs_login(page.url)
 
 
+def session_alive(page):
+    """로그인이 **지금** 살아 있는가. `doctor.py` 가 부른다.
+
+    `partners_link` 도 같은 이름으로 갖고 있다. 점검이 두 플랫폼에
+    같은 방법으로 물어볼 수 있어야 한쪽만 빠뜨리는 일이 없다.
+    """
+    return goto_products(page)
+
+
 # ---------------------------------------------------------------- 발급
 
 def scan_cards(page):

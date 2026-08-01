@@ -403,6 +403,16 @@ def is_logged_in(page):
     return "링크 생성" in txt or "마이 페이지" in txt
 
 
+def session_alive(page):
+    """로그인이 **지금** 살아 있는가. `doctor.py` 가 부른다.
+
+    `toss_link` 도 같은 이름으로 갖고 있다. 점검이 두 플랫폼에 같은
+    방법으로 물어볼 수 있어야 한쪽만 빠뜨리는 일이 없다.
+    """
+    goto_link_page(page)
+    return is_logged_in(page)
+
+
 def tick_keep_login(page):
     """로그인 화면의 '자동 로그인' 을 체크한다.
 
