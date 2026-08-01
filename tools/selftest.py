@@ -32,6 +32,22 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 
 # `.env` 의 실제 값이 시험에 끼어들지 않게 한다. 소유자 chat_id 가
 # 들어와 있으면 권한 시험이 통째로 무의미해진다.
+#
+# ⚠️ 지우는 것만으로는 부족하다. `load_env()` 는 `_loaded` 로 딱 한 번만
+#    `.env` 를 읽는데, 그 첫 호출이 **시험 도중**에 일어난다. src 모듈을
+#    시험 함수 안에서 늦게 import 하기 때문이다. 그래서 여기서 지워도
+#    나중에 import 되는 순간 되살아난다.
+#
+#    실측: TG_CHAT_ID 를 지운 뒤 `import telegram_deliver` 하면
+#    6658586550(소유자 실제 chat_id)으로 부활했다. 그래서 전달 시험이
+#    소유자 PC 에서만 깨졌다 — 로직이 아니라 격리가 샌 것이다.
+#
+#    '이미 읽었다' 고 표시해 `.env` 를 아예 안 읽게 만든다. 세 키만
+#    막으면 다른 값이 또 새므로 통째로 막는다.
+import env as _env
+_env._loaded = True
+
+# 시스템 환경변수로 직접 설정된 경우까지 막는다(`.env` 밖의 경로).
 for k in ("TG_CHAT_ID", "TG_ADMIN_IDS", "TG_BOT_TOKEN"):
     os.environ.pop(k, None)
 
