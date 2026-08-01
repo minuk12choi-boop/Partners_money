@@ -15,7 +15,14 @@ chcp 65001 >nul
 cd /d "%~dp0..\src"
 
 REM cmd 는 이 파일을 ANSI 로 읽는다. echo 에 한글을 쓰면 로그가 깨진다.
-REM 한글은 REM 주석에만 둔다(무시되므로 안전).
+REM 한글은 REM 주석에만 둔다. 단, `goto` 를 쓰는 파일에서는 REM 주석의
+REM 한글도 위험하다 — cmd 가 바이트 오프셋으로 되감아 글자 중간에
+REM 떨어진다. run_listener.cmd 가 그래서 죽었다(2026-08-02 실측).
+REM 이 파일에는 goto 가 없어 무사하다. 추가하지 말 것.
+
+REM 파이썬이 리다이렉트된 stdout 에 cp949 로 쓰는 것을 막는다.
+set PYTHONIOENCODING=utf-8
+
 echo [%date% %time%] run_bot.cmd start >> "%~dp0..\src\run.log"
 
 REM py 런처가 PATH 에 없을 수 있다. 없으면 python 으로 넘어간다.

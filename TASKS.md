@@ -977,10 +977,61 @@ powershell -ExecutionPolicy Bypass -File tools\install_task.ps1 -Remove   # 해�
 동작했다: `'대화 내보내기' 이 최상위 창에 없음 → 인앱 모달로 보고 진행`
 → `카톡창 포커스 + Enter 전송 (시도 1회)` → 완료.
 
-**남은 것은 T5 뿐이다** — 이 한 바퀴를 사람 없이 계속 돌리는 것.
-`tools\start.cmd` 를 앱 밖에서 띄우거나 작업 스케줄러에 등록한다.
-아직 확인 안 된 것: 실패 알림이 실제로 오는지, 재부팅 후 살아나는지,
-두 사이트 세션이 며칠 버티는지.
+### ✅ T5 — 작업 스케줄러 등록 완료 (2026-08-02)
+
+소유자 지시로 등록하고 지금 실행까지 했다. 둘 다 `Running`.
+
+```
+PartnersMoneyBot        tools\run_bot.cmd       파이프라인 (20분 주기)
+PartnersMoneyListener   tools\run_listener.cmd  텔레그램 봇 (상시)
+```
+
+로그온 시 시작, `LogonType Interactive`, 실패 시 5분 간격 3회 재시도.
+로그온 **2분 뒤** 시작하도록 `$trigger.Delay = "PT2M"` 를 넣었다. 로그온
+직후에는 카카오톡이 아직 안 떠 있어 첫 주기가 헛돌기 때문이다.
+
+**관측 — `run_listener.cmd` 가 255 로 즉사했다. 원인은 한글 주석이다:**
+
+등록 직후 `PartnersMoneyListener` 만 죽었고 `bot.log` 조차 안 생겼다.
+직접 돌려 보니:
+
+```
+'<깨진 글자>' is not recognized as an internal or external command
+```
+
+주석 조각을 명령으로 실행하고 있었다. **`cmd.exe` 는 `goto` 로 점프할 때
+배치 파일을 바이트 오프셋으로 되감는다.** 한글은 멀티바이트라 글자 중간에
+떨어지고, 그때부터 파싱이 어긋난다.
+
+실측으로 갈랐다:
+
+```
+run_bot.cmd       비ASCII 537바이트  goto 없음  → 정상
+run_listener.cmd  비ASCII 680바이트  goto 있음  → 255 로 즉사
+같은 파일에서 한글만 제거        goto 있음  → 정상 동작
+```
+
+저장소에 있던 "한글은 REM 주석에만 두면 무시되므로 안전" 은 **`goto` 가
+있는 파일에서는 틀리다.** REM 도 바이트고, `goto` 는 바이트를 센다.
+`run_listener.cmd` 를 ASCII 전용으로 다시 썼다(비ASCII 0바이트).
+
+**관측 — 로그가 복구 불가능하게 깨지고 있었다:**
+
+```
+run.log  占쏙옙占쏙옙 占쏙옙占?      <- UTF-8 을 cp949 로 읽고 다시 저장. 복구 불가
+bot.log  cp949 로 기록됨          <- 깨진 건 아니고 인코딩만 다름
+```
+
+`run_step()` 은 UTF-8 로 **읽고** 있었는데 자식 프로세스가 cp949 로
+**쓰고** 있었다. 파이썬은 stdout 이 파이프일 때 로케일 인코딩을 쓴다.
+그래서 디코딩 시점에 `errors="replace"` 로 뭉개지고, 뭉개진 문자가
+그대로 UTF-8 파일에 저장됐다. 화면은 멀쩡해 보여서 알아채기 어렵다.
+
+`PYTHONIOENCODING=utf-8` 을 자식 환경에 넣어 해결했다(`CHILD_ENV`,
+두 `.cmd` 에도 `set`). 고친 뒤 로그가 전부 읽힌다.
+
+**아직 확인 안 된 것:** 실패 알림이 실제로 오는지(일부러 실패시켜 봐야
+한다), 재부팅 후 정말 살아나는지, 두 사이트 세션이 며칠 버티는지.
 
 ### 참고 — 처음에 미검증이라고 적어 둔 것들 (전부 해소됨)
 

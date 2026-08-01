@@ -104,12 +104,23 @@ def write_status(**kw):
         json.dump(kw, f, ensure_ascii=False, indent=2)
 
 
+# 자식 프로세스가 UTF-8 로 말하게 한다.
+#
+# ⚠️ 이걸 안 하면 로그가 복구 불가능하게 깨진다(2026-08-02 실측).
+# 파이썬은 stdout 이 파이프일 때 로케일 인코딩(한국어 윈도우면 cp949)으로
+# 쓴다. 아래에서 UTF-8 로 읽으니 글자가 errors="replace" 로 뭉개지고,
+# 그 뭉개진 문자가 그대로 run.log 에 저장된다. 원문은 그 시점에 사라진다.
+# 화면에서는 멀쩡해 보이는데 로그만 깨져서 알아채기 어렵다.
+CHILD_ENV = dict(os.environ, PYTHONIOENCODING="utf-8")
+
+
 def run_step(name, cmd, timeout=900):
     """하위 스크립트 실행. (성공여부, 출력) 반환."""
     log(f"── {name}")
     try:
         r = subprocess.run(cmd, cwd=HERE, capture_output=True, text=True,
-                           timeout=timeout, encoding="utf-8", errors="replace")
+                           timeout=timeout, encoding="utf-8", errors="replace",
+                           env=CHILD_ENV)
     except subprocess.TimeoutExpired:
         log(f"{name}: 타임아웃", "ERROR")
         return False, "timeout"

@@ -1,22 +1,38 @@
 @echo off
 REM ---------------------------------------------------------------
-REM run_listener.cmd — 텔레그램 봇(수신 담당) 진입점
+REM run_listener.cmd - Telegram bot entry point (Task Scheduler)
 REM
-REM telegram_bot.py 를 long polling 으로 계속 돌린다.
-REM 사장님이 봇에게 보낸 링크·딜방 글을 발행 문구로 만들어 회신한다.
+REM   *** ASCII ONLY. DO NOT PUT KOREAN TEXT IN THIS FILE. ***
 REM
-REM 파이프라인(run_bot.cmd)과 **별개 작업**이다. 한쪽이 죽어도 다른 쪽은
-REM 계속 돈다. 둘이 같은 브라우저 프로필을 쓸 때는 src/lock.py 가 막는다.
+REM This file uses `goto`. When cmd.exe jumps, it re-seeks the batch
+REM file by BYTE OFFSET. Multi-byte UTF-8 characters make it land in
+REM the middle of a character, after which it parses garbage and
+REM runs fragments of these comments as commands.
 REM
-REM ⚠️ 이쪽도 로그온한 데스크톱 세션이 필요하다. 쿠팡 링크를 만들 때
-REM    playwright 로 브라우저를 띄우기 때문이다(headless 금지).
+REM Measured 2026-08-02 on the owner's PC: the task exited 255 and
+REM never even created bot.log.
+REM   '<garbage>' is not recognized as an internal or external command
+REM The same file with Korean stripped runs fine. run_bot.cmd has no
+REM `goto`, which is why only this one died.
+REM
+REM REM comments are NOT safe here just because cmd ignores them.
+REM They are still bytes, and `goto` counts bytes.
+REM
+REM Korean rationale and the measurement: TASKS.md, T5 section.
+REM
+REM Needs a logged-on interactive desktop: telegram_bot opens a
+REM visible browser to build Coupang links (headless is forbidden,
+REM CLAUDE.md constraint 5).
 REM ---------------------------------------------------------------
 
 chcp 65001 >nul
 cd /d "%~dp0..\src"
 
-REM cmd 는 이 파일을 ANSI 로 읽는다. echo 에 한글을 쓰면 로그가 깨진다.
-REM 한글은 REM 주석에만 둔다(무시되므로 안전).
+REM Without this, Python writes cp949 when stdout is redirected to a
+REM file, so bot.log ends up in a different encoding than every other
+REM file in the project. Measured 2026-08-02.
+set PYTHONIOENCODING=utf-8
+
 echo [%date% %time%] run_listener.cmd start >> "%~dp0..\src\bot.log"
 
 :loop
@@ -27,8 +43,8 @@ if %errorlevel%==0 (
     python telegram_bot.py >> "%~dp0..\src\bot.log" 2>&1
 )
 
-REM 네트워크가 끊기거나 텔레그램이 잠시 막으면 죽을 수 있다.
-REM 조용히 멈추면 사장님이 보낸 메시지가 영원히 답을 못 받는다. 되살린다.
+REM A network drop or a Telegram outage can kill it. If it stays
+REM dead, messages the owner sends are never answered. Bring it back.
 echo [%date% %time%] telegram_bot.py exit=%errorlevel%, restarting in 30s >> "%~dp0..\src\bot.log"
 timeout /t 30 /nobreak >nul
 goto loop

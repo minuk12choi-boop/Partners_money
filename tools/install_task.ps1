@@ -87,7 +87,13 @@ if (-not (Test-Path $EnvFile)) {
 }
 
 # 로그온 시 시작한다. 재부팅해도 로그인만 하면 살아난다.
+#
+# 다만 로그온 **직후** 는 아니다. 그때는 카카오톡이 아직 안 떴고 네트워크도
+# 덜 올라와 있다. 그 상태로 첫 주기가 돌면 카톡 창을 못 찾아 실패하고,
+# 무인 운영에서는 그 실패가 왜 났는지 보이지 않는다.
+# 2분 늦춘다. 첫 주기 한 번을 헛돌리는 것보다 낫다.
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$trigger.Delay = "PT2M"
 
 # Interactive: 로그온한 데스크톱에서만 실행한다. 위 주석 참고. 바꾸지 말 것.
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME `
