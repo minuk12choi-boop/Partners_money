@@ -14,44 +14,40 @@ OneDrive 안에 두지 않는다. 24시간 무인 운영 중 동기화가 `deals
 
 ---
 
-## 🚀 이어서 시작하기 (로컬 세션)
+## 🚀 이어서 시작하기 (Claude 데스크탑 앱)
 
-**폴더는 이미 있다. 다시 clone 하지 마라.** `deals.db`, `.env`,
-`pw_profile/`, `pw_toss_profile/` 은 커밋되지 않는 로컬 상태이고,
-다시 받으면 로그인 세션과 수집분 300여 건이 통째로 사라진다.
+**소유자는 데스크탑 앱을 쓴다. 터미널이 아니다.** 명령을 치라고 하지
+말고 세션이 직접 실행한다. 자세한 것은 `CLAUDE.md` 의 실행 환경 절.
 
-```
-cd C:\Users\dkrt\Partners_money
-git status                                          ← 내 변경이 있나 먼저 본다
-git stash                                           ← 있으면 넣어 두고
-git pull origin claude/partners-money-repo-v9jgbv
-git stash pop                                       ← 넣어 뒀으면 되돌린다
-claude
-```
+### 소유자가 하는 것
 
-`git pull` 이 충돌하면 **`.env` 나 `deals.db` 때문일 리는 없다**
-(둘 다 `.gitignore` 에 있다). 소스 충돌이면 양쪽을 다 읽고 합쳐라.
-
-세션을 열고 아래를 그대로 붙여넣으면 된다.
+1. Claude 데스크탑 앱을 연다
+2. 프로젝트로 **`C:\Users\dkrt\Partners_money`** 를 고른다 (이미 열려 있으면 그냥 쓴다)
+3. 아래를 붙여넣는다
 
 ```
 이 저장소에서 작업을 이어간다. 폴더는 이미 있고 브랜치는
 claude/partners-money-repo-v9jgbv 다. 다시 clone 하지 마라.
+나는 데스크탑 앱을 쓴다. 나한테 명령어를 치라고 하지 말고 네가 실행해라.
 
-먼저 docs/HANDOFF.md → CLAUDE.md → TASKS.md 순서로 읽어라.
-지금 할 일은 TASKS.md 의 T7 확인이다. 코드는 다 짜여 있고
-실제 환경에서 안 돌려 본 것만 남았다.
+먼저 원격 최신으로 맞춰라. 내 변경이 남아 있으면 stash 로 보존하고
+pull 한 뒤 되돌려라. 그다음 docs/HANDOFF.md → CLAUDE.md → TASKS.md
+순서로 읽어라.
 
-1) py tools\selftest.py 로 로직이 성한지 먼저 본다 (54개 전부 통과해야 함)
-2) py src\doctor.py 를 돌려 결과를 그대로 보여 줘라
-3) [실패] 가 있으면 그것부터 해결한다
+지금 할 일은 TASKS.md 의 T7 확인이다. 코드는 다 짜여 있고 실제
+환경에서 안 돌려 본 것만 남았다.
+
+1) tools/selftest.py 를 돌려 로직이 성한지 먼저 본다 (54개 전부 통과해야 함)
+2) src/doctor.py 를 돌려 결과를 그대로 보여 줘라
+3) [실패] 가 있으면 그것부터 해결한다.
+   브라우저 로그인처럼 내가 직접 해야 하는 것만 나한테 시켜라
 4) 그다음 딜방의 토스 글을 봇에 넣어 issue_for_product() 가
    실제로 내 쉐어링크를 만드는지 확인한다.
    card_miss 가 나오면 대시보드 카드 제목과 목록 API 의
    displayName 을 나란히 찍어 어디가 다른지 관측한 뒤 고쳐라.
 
 규칙:
-- 코드를 고쳤으면 커밋 전에 py tools\selftest.py 를 다시 돌려라.
+- 코드를 고쳤으면 커밋 전에 tools/selftest.py 를 다시 돌려라.
   거기 있는 규칙은 대부분 '틀리면 남의 링크를 발행한다' 류다.
 - 고치기 전에 관측부터 해라. 추측으로 덮지 마라.
 - 관측한 실제 값은 TASKS.md 의 '관측:' 에 기록해라.
@@ -61,11 +57,25 @@ claude/partners-money-repo-v9jgbv 다. 다시 clone 하지 마라.
 - 코드로 알아낼 수 없는 것은 추측하지 말고 나에게 물어봐라.
 ```
 
-평소 운영은 이것 하나다. 작업과 별개로 켜 두면 된다.
+### 세션이 하는 것
 
-```
-tools\start.cmd
-```
+**다시 clone 하지 마라.** `deals.db`, `.env`, `pw_profile/`,
+`pw_toss_profile/` 은 커밋되지 않는 로컬 상태이고, 다시 받으면 로그인
+세션과 수집분 300여 건이 통째로 사라진다.
+
+동기화는 `git status` → 변경 있으면 `git stash` → `git pull origin
+claude/partners-money-repo-v9jgbv` → `git stash pop` 순서로 **세션이
+직접** 한다. 충돌이 나면 `.env` 나 `deals.db` 때문일 리는 없다(둘 다
+`.gitignore` 에 있다). 소스 충돌이면 양쪽을 다 읽고 합친다.
+
+### 평소 운영 — 이건 앱 밖에서 돈다
+
+**`tools\start.cmd` 는 앱 안에서 돌리면 안 된다.** 24시간 떠 있어야
+하는데 앱 세션이 끝나면 같이 죽는다.
+
+파일 탐색기에서 `C:\Users\dkrt\Partners_money\tools\start.cmd` 를
+**더블클릭**한다. 검은 창이 뜨고 거기서 계속 돈다. 그 창을 닫으면
+멈춘다. 나중에는 작업 스케줄러에 등록해 부팅 시 자동으로 뜨게 한다(T5).
 
 ### 손대기 전과 후에 반드시 돌릴 것
 
