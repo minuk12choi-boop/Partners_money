@@ -542,20 +542,56 @@ def pick(cards, conn, limit, max_price=None):
 
 # ---------------------------------------------------------------- 메인
 
-def do_login():
+# 로그인을 기다리는 시간. 토스는 앱 승인·2단계 인증이 붙을 수 있어
+# 넉넉히 준다. 다 쓰면 그냥 끝난다 — 창을 강제로 닫지는 않는다.
+LOGIN_WAIT_SECONDS = 600
+LOGIN_POLL_SECONDS = 5
+
+
+def do_login(wait=LOGIN_WAIT_SECONDS):
+    """브라우저를 띄우고 로그인이 끝날 때까지 **스스로 기다린다.**
+
+    ⚠️ 예전에는 `input()` 으로 Enter 를 기다렸다. 소유자는 데스크탑 앱을
+    쓰고 터미널을 열지 않는다(CLAUDE.md 실행 환경). 앱에서 돌리면 stdin
+    이 없어 EOF 로 즉사하고, 로그인이 끝나기도 전에 브라우저가 닫힌다.
+
+    그래서 사람에게 묻지 않고 화면을 직접 확인한다.
+    """
+    os.makedirs(SHOT_DIR, exist_ok=True)
     with sync_playwright() as pw:
         ctx = open_context(pw)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.goto(HOME_URL, wait_until="domcontentloaded")
-        print("\n브라우저에서 토스 비즈니스 계정으로 로그인한 뒤")
-        print("여기서 Enter 를 누르세요.")
-        input()
-        ok = goto_products(page)
-        os.makedirs(SHOT_DIR, exist_ok=True)
-        page.screenshot(path=os.path.join(SHOT_DIR, "toss_after_login.png"))
-        log("로그인 확인" if ok else "아직 로그인 화면입니다. 다시 시도하세요.")
+
+        log("─" * 56)
+        log("브라우저에서 토스 비즈니스 계정으로 로그인하세요.")
+        log("로그인이 끝나면 이 창이 알아서 알아차립니다. 기다리세요.")
+        log(f"(최대 {wait // 60}분)")
+        log("─" * 56)
+
+        ok = False
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            try:
+                if goto_products(page):
+                    ok = True
+                    break
+            except Exception as e:
+                # 사람이 창을 닫았거나 이동 중이다. 더 볼 것이 없다.
+                log(f"확인 중 오류: {str(e)[:60]}")
+                break
+            left = int(deadline - time.time())
+            log(f"아직 로그인 전입니다. 기다리는 중... ({left}초 남음)")
+            time.sleep(LOGIN_POLL_SECONDS)
+
+        try:
+            page.screenshot(path=os.path.join(SHOT_DIR, "toss_after_login.png"))
+        except Exception:
+            pass
+        log("✅ 로그인 확인" if ok else "🔴 로그인되지 않았습니다. 다시 실행하세요.")
         log(f"세션 저장 → {PROFILE_DIR}")
         ctx.close()
+    return ok
 
 
 def do_run(limit, dry_run, max_price=MAX_PRICE):

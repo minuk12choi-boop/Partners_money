@@ -442,6 +442,12 @@ def tick_keep_login(page):
         return False
 
 
+# 로그인을 기다리는 시간. 쿠팡은 로그인 화면에 OTP iframe 이 있어
+# 추가 인증이 붙을 수 있다. 넉넉히 준다.
+LOGIN_WAIT_SECONDS = 600
+LOGIN_POLL_SECONDS = 5
+
+
 def do_login():
     os.makedirs(SHOT_DIR, exist_ok=True)
 
@@ -455,21 +461,31 @@ def do_login():
             log("이미 로그인돼 있습니다.")
         else:
             tick_keep_login(page)
-            print()
-            print("─" * 60)
-            print("브라우저에서 로그인을 완료하세요.")
-            print("'자동 로그인' 은 스크립트가 켜 두었습니다. 끄지 마세요.")
-            print("끄면 브라우저를 닫는 순간 세션이 사라집니다.")
-            print("끝났으면 여기서 Enter 를 누르세요.")
-            print("─" * 60)
-            try:
-                input()
-            except EOFError:
-                log("입력을 받을 수 없습니다. 대화형 콘솔에서 실행하세요.")
-                ctx.close()
-                return False
+            log("─" * 56)
+            log("브라우저에서 로그인을 완료하세요.")
+            log("'자동 로그인' 은 스크립트가 켜 두었습니다. 끄지 마세요.")
+            log("끄면 브라우저를 닫는 순간 세션이 사라집니다.")
+            log("로그인이 끝나면 이 창이 알아서 알아차립니다. 기다리세요.")
+            log(f"(최대 {LOGIN_WAIT_SECONDS // 60}분)")
+            log("─" * 56)
 
-            goto_link_page(page)
+            # ⚠️ 예전에는 input() 으로 Enter 를 기다렸다. 소유자는 데스크탑
+            # 앱을 쓰고 터미널을 열지 않는다(CLAUDE.md 실행 환경). 앱에서
+            # 돌리면 stdin 이 없어 EOF 로 즉사하고, 로그인이 끝나기도 전에
+            # 브라우저가 닫힌다. 그래서 화면을 직접 확인한다.
+            deadline = time.time() + LOGIN_WAIT_SECONDS
+            while time.time() < deadline:
+                try:
+                    goto_link_page(page)
+                    if is_logged_in(page):
+                        break
+                except Exception as e:
+                    log(f"확인 중 오류: {str(e)[:60]}")
+                    break
+                left = int(deadline - time.time())
+                log(f"아직 로그인 전입니다. 기다리는 중... ({left}초 남음)")
+                time.sleep(LOGIN_POLL_SECONDS)
+
             page.screenshot(path=os.path.join(SHOT_DIR, "after_login.png"))
             if not is_logged_in(page):
                 log("🔴 아직 로그인 상태가 아닙니다 → shots/after_login.png")
