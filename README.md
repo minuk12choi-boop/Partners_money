@@ -1,36 +1,89 @@
 # Partners_money
 
-카카오톡 딜 오픈채팅방 → 쿠팡 파트너스 링크 → Threads 자동 발행 파이프라인.
+카카오톡 딜 오픈채팅방 → 내 쿠팡 파트너스 / 토스 쉐어링크 → 텔레그램 전달.
 
 Windows 전용. 24시간 켜둔 PC에서 무인 운영하는 것을 전제로 한다.
 
-## 빠른 시작
+## 평소에는 이것 하나만 실행한다
 
-```bash
-pip install -r requirements.txt
-playwright install chromium
-
-python src/partners_link.py --login          # 최초 1회 수동 로그인
-python src/run_all.py --room "방이름" --once --dry-run
 ```
+tools\start.cmd
+```
+
+더블클릭해도 된다. 이게 두 가지를 띄우고 죽으면 다시 살린다.
+
+- **20분마다** 카톡방을 훑어 새 딜을 잡고, 내 링크를 만들어, **구독자 전원**에게 보낸다
+- **텔레그램 봇** — 딜방 글을 붙여넣으면 그 자리에서 내 링크로 바꿔 회신한다
+
+창을 닫으면 둘 다 멈춘다. 켜 두세요.
+
+## 처음 한 번만 하는 것
+
+```
+py -m pip install -r requirements.txt
+py -m playwright install chromium
+
+copy .env.example .env                  ← TG_BOT_TOKEN, KAKAO_ROOM 채우기
+
+py src\partners_link.py --login         ← 쿠팡 파트너스 로그인 ('자동 로그인' 켜기)
+py src\toss_link.py --login             ← 토스 쉐어링크 로그인
+```
+
+그런 다음 텔레그램에서 봇을 열고 **'시작'(/start)** 을 누른다.
+`py src\telegram_deliver.py --whoami` 로 나온 숫자를 `.env` 의 `TG_CHAT_ID` 에 적는다.
+
+## 안 될 때
+
+```
+py src\doctor.py
+```
+
+무엇이 막고 있는지 한 번에 알려준다. `[실패]` 아래의 `→` 를 그대로 하면 된다.
+
+## 받는 사람 · 시키는 사람
+
+| 구분 | 누구 | 할 수 있는 것 |
+|---|---|---|
+| 구독자 | 봇에 `/start` 한 사람 누구나 | 새 딜 문구를 **받는다** |
+| 관리자 | `.env` 의 `TG_CHAT_ID`(+ `TG_ADMIN_IDS`) | 링크를 보내 **변환을 시킨다** |
+
+변환은 아무나 시킬 수 없다. 한 번이 곧 이 PC 의 브라우저로 쿠팡·토스에
+접속하는 것이라, 열어 두면 접근 빈도 제한이 깨져 계정이 막힌다.
+
+누가 받고 있는지: `py src\telegram_deliver.py --subscribers`
+
+## 봇에 무엇을 보내면 되나
+
+| 보내는 것 | 결과 |
+|---|---|
+| 딜방의 **쿠팡** 글 통째로 | 방장 링크를 버리고 **내 파트너스 딥링크**로 바꿔 회신 |
+| 딜방의 **토스** 글 통째로 | 상품만 확인하고 **내 쉐어링크를 새로 발급**해 회신 |
+| 내 토스 쉐어링크 + 숫자 | `https://toss.im/_m/abc 7990 24800` — 앞이 판매가, 뒤가 정가 |
+
+토스는 쉐어링크 대시보드가 골라 둔 상품(약 117개)만 자동 발급이 된다.
+목록에 없으면 그렇다고 알려 준다 — 그때만 앱에서 직접 발급하시면 된다.
+**어느 경우에도 방장 링크를 그대로 내보내지 않는다.** 그러면 수익이 방장에게 간다.
 
 ## 구성
 
 | 파일 | 역할 |
 |---|---|
+| `src/main.py` | 주기 작업과 봇을 함께 띄우고 죽으면 살린다 (**진입점**) |
+| `src/doctor.py` | 안 도는 이유를 한 번에 진단 |
+| `src/run_all.py` | 20분 주기로 아래 4단계를 반복 |
 | `src/kakao_export.py` | PC 카톡 창에 Ctrl+S를 보내 대화를 txt로 내보냄 |
 | `src/kakao_deal_extract.py` | txt 파싱, 단축링크 해석, 중복 제거 → `deals.db` |
-| `src/partners_link.py` | 본인 파트너스 세션으로 딥링크 생성 (임시. Phase 1에서 폐기) |
-| `src/threads_post.py` | 문구 생성 및 Threads 발행 |
-| `src/run_all.py` | 위 4단계를 45분 주기로 반복 |
+| `src/partners_link.py` | 내 파트너스 세션으로 쿠팡 딥링크 생성 (Phase 1에서 폐기) |
+| `src/toss_link.py` | 쉐어링크 대시보드에서 토스 링크 발급 |
+| `src/telegram_deliver.py` | 완성된 문구를 구독자 전원에게 전달 |
+| `src/telegram_bot.py` | 봇. 구독 접수 + 보내 주신 딜을 그 자리에서 변환 |
+| `src/threads_post.py` | 문구 생성(고지 문구 규칙의 **단일 출처**). 자동 발행은 지금 미사용 |
+
+마지막 단계는 자동이 아니다. 파이프라인은 '링크 + 완성된 본문'을 텔레그램으로
+보내는 데까지 하고, 스레드에 올리는 것은 사람이 한다(소유자 결정 2026-07-29).
 
 ## 문서
 
 - **[CLAUDE.md](CLAUDE.md)** — 아키텍처, 검증 상태, 절대 완화 금지 제약
-- **[TASKS.md](TASKS.md)** — 순서대로 진행할 작업 목록
-
-## 경고
-
-이 저장소의 코드는 실제 Windows / 카카오톡 / 쿠팡 파트너스 / Threads API 환경에서
-아직 검증되지 않았다. 문법과 파싱 로직만 확인된 상태다.
-`CLAUDE.md`의 검증 상태 표를 먼저 읽을 것.
+- **[TASKS.md](TASKS.md)** — 작업 목록과 실측 기록(`관측:`)
+- **[docs/HANDOFF.md](docs/HANDOFF.md)** — 현재 상태와 다음 할 일

@@ -150,7 +150,33 @@ Ctrl+S 이후 흐름은 3단계이며, 마지막 완료 알림은 **Win32 객체
 
 ## 다음에 할 일 — 우선순위 순
 
-### 1. T5 — 무인 운영 전환 🔴 **여기가 마지막이다**
+### 0. T7 확인 — 새로 들어온 것 (2026-08-01) 🔴 **여기부터**
+
+소유자 지시로 네 가지가 바뀌었다. 문법·로직은 확인했지만 **실제 환경에서는
+아직 안 돌려 봤다.** 자세한 것은 `TASKS.md` 의 T7 절을 볼 것.
+
+```
+py src\doctor.py        ← 무엇이 막고 있는지 한 번에 보여준다. 여기부터
+tools\start.cmd         ← 평소 실행은 이것 하나. 주기 작업 + 봇을 같이 띄운다
+```
+
+| 바뀐 것 | 어디 |
+|---|---|
+| 주기 45분 → 5분 → **20분** | `run_all.py` `CYCLE_MINUTES` |
+| `.env` 한 명 → **`/start` 한 사람 전원** | `subscribers` 테이블, `telegram_deliver.py` |
+| 딜방 **토스** 글도 내 링크로 변환 (전엔 거절) | `telegram_bot.handle_toss_room` + `toss_link.issue_for_product` |
+| 명령 하나로 전부 실행 | `src/main.py`, `tools/start.cmd` |
+
+**변환 권한은 관리자(`TG_CHAT_ID`)만이다.** 구독은 누구나 되지만 변환은
+아니다. 변환 한 번이 곧 이 PC 의 브라우저로 파트너스·토스에 접근하는
+것이라 열어 두면 제약 2 가 깨진다.
+
+가장 먼저 확인할 것은 `toss_link.issue_for_product()` 다. 대시보드 카드를
+**상품명으로** 찾는데, 카드 제목과 목록 API 의 `displayName` 이 글자 단위로
+같다는 보장이 없다. 다르면 `card_miss` 로 끝난다(틀린 링크가 나가지는
+않는다 — 발급 후 상품 ID 로 대조해 다르면 버린다).
+
+### 1. T5 — 무인 운영 전환 🔴
 
 부품은 전부 하나씩 검증됐다. 남은 것은 이어 붙여 자동으로 돌리는 것이다.
 
@@ -159,6 +185,9 @@ py src/run_all.py --once --dry-run    # 전 구간 연결 확인
 py src/run_all.py --once              # 실제 전송까지
 powershell -ExecutionPolicy Bypass -File tools\install_task.ps1
 ```
+
+※ 스케줄러 진입점을 `tools/run_bot.cmd` 에서 `tools/start.cmd` 로 바꾸는
+것을 검토할 것. 봇까지 같이 살아나야 완전한 무인 운영이 된다.
 
 **반드시 대화형 데스크톱에서 실행해야 한다.** 설정으로 우회할 수 없다.
 `pywinauto` 는 실제 창에 키를 보내고 `playwright` 는 `headless=False` 다.
@@ -215,6 +244,9 @@ powershell -ExecutionPolicy Bypass -File tools\install_task.ps1
 | 쿠팡 봇 차단 | 403 을 주지만 리다이렉트로 productId 추출은 성공.<br>나중에 리다이렉트까지 막히면 조용히 실패한다 |
 | 토스 수수료 10% | **9월 25일까지** 프로모션. 영구 요율 아님 |
 | 토스 발급 링크 목록 화면 | 못 찾았다. 계측 중 발급한 2건이 DB 에 없다 |
+| `toss_link.issue_for_product()` | **미검증.** 카드를 상품명으로 찾는다. 카드 제목과 목록 API `displayName` 이 다르면 못 찾는다 |
+| `doctor.check_kakao()` | **미검증.** T1 에서 확인한 클래스명을 쓰지만 점검 맥락에서 돌린 적 없다 |
+| 구독자가 여럿일 때 텔레그램 한도 | 초당 30건 근처에서 429 가 온다. 지금은 0.15초 간격.<br>구독자가 200명을 넘으면 다시 볼 것 |
 
 ---
 

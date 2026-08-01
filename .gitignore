@@ -12,6 +12,8 @@ pending.csv
 selectors.json
 toss_selectors.json
 run.log
+bot.log
+main.log
 status.json
 shots/
 dump_selectors.txt

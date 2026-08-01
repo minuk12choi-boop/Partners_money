@@ -38,7 +38,7 @@ from playwright.sync_api import sync_playwright
 
 import toss_api
 from env import load_env
-from lock import profile_lock
+from lock import profile_lock, LockBusy
 from schema import ensure_deals
 
 load_env()
@@ -317,6 +317,94 @@ def read_clipboard_link(page):
     return m.group(0) if m else None
 
 
+def find_card(cards, title):
+    """상품명으로 카드를 찾는다. **정확히 하나만 맞을 때만** 돌려준다.
+
+    카드 DOM 에는 상품 ID 가 없다(실측). 그래서 대시보드 목록 API 가 준
+    `displayName` 으로 짝을 맞춘다.
+
+    ⚠️ 여러 개가 맞으면 포기한다. 아무거나 고르면 **다른 상품의 링크를
+    그 상품이라고 발행**하게 된다. 못 찾는 것보다 훨씬 나쁘다.
+    발급 뒤에 상품 ID 로 한 번 더 대조하지만, 그때는 이미 링크를 한 건
+    써 버린 뒤다.
+    """
+    if not title:
+        return None
+
+    def norm(s):
+        return re.sub(r"\s+", "", s or "")
+
+    want = norm(title)
+    exact = [c for c in cards if norm(c.get("title")) == want]
+    if len(exact) == 1:
+        return exact[0]
+    if exact:
+        return None     # 같은 이름이 여럿이면 구분할 방법이 없다
+
+    partial = [c for c in cards
+               if want and (want in norm(c.get("title"))
+                            or norm(c.get("title")) in want)]
+    return partial[0] if len(partial) == 1 else None
+
+
+def issue_for_product(page, taca_id, log=log):
+    """상품 ID 하나를 지정해 **내** 쉐어링크를 발급한다.
+
+    (링크, 상품정보) 또는 (None, 사유) 를 돌려준다.
+
+    딜방에 올라온 토스 딜을 봇으로 넘겼을 때 쓴다. 방장 링크는 어떤
+    상품인지 알아내는 데만 쓰고 버린다. 그대로 내보내면 수익이 방장에게
+    간다.
+
+    ⚠️ **발급된 링크가 요청한 상품의 것인지 반드시 대조한다.** 카드를
+    제목으로 찾기 때문에 잘못 짚을 여지가 있고, 잘못 짚으면 엉뚱한 상품
+    링크를 그 상품이라고 발행하게 된다. 대조에 실패하면 링크를 버린다
+    (이미 발급된 링크는 로그에 남긴다 — 조용히 잃지 않기 위함).
+
+    **한계**: 대시보드 큐레이션 목록(약 117개)에 있는 상품만 된다.
+    토스 PC 웹에는 상품 검색이 없어서(실측) 목록 밖 상품은 발급할 방법이
+    없다. 그때는 사장님이 토스 앱에서 직접 발급하셔야 한다.
+    """
+    taca_id = str(taca_id)
+    products = fetch_dashboard(page, log=log)
+    info = products.get(taca_id)
+    if not info:
+        return None, ("dashboard_miss", "대시보드 큐레이션 목록에 없는 상품")
+
+    cards = scan_cards(page)
+    if not cards:
+        return None, ("no_cards", "대시보드에서 상품 카드를 찾지 못했습니다")
+
+    card = find_card(cards, info.get("title"))
+    if card is None:
+        return None, ("card_miss",
+                      f"목록에는 있는데 화면에서 카드를 특정하지 못했습니다"
+                      f" ({(info.get('title') or '')[:30]})")
+
+    link, pid = issue_link(page, card["idx"])
+    if not link:
+        return None, ("issue_fail", "링크 발급 버튼이 응답하지 않았습니다")
+
+    if not pid:
+        pid = resolve_product_id(page, link)
+
+    if str(pid) != taca_id:
+        # 여기서 그냥 쓰면 다른 상품의 링크를 발행하게 된다. 버린다.
+        log(f"  ! 발급된 링크가 요청한 상품과 다릅니다. 버립니다.")
+        log(f"    요청 {taca_id} / 발급 {pid} / 링크 {link}")
+        return None, ("mismatch",
+                      "발급된 링크가 요청한 상품과 달라 사용하지 않았습니다")
+
+    return link, info
+
+
+def fetch_dashboard(page, log=log):
+    """대시보드 목록 API. 로그인 상태가 아니면 빈 dict."""
+    if needs_login(page.url):
+        return {}
+    return toss_api.fetch_products(page, log=log)
+
+
 def resolve_product_id(page, sharelink):
     """내 링크를 따라가 상품 ID 를 얻는다. 대비책 경로.
 
@@ -541,6 +629,30 @@ def do_run(limit, dry_run, max_price=MAX_PRICE):
     conn.close()
     log(f"발급 결과: 성공 {ok} / 실패 {fail} / 기존 {skip}")
     return ok, fail
+
+
+def issue_one(taca_id, log=log):
+    """상품 ID 하나에 대해 브라우저를 열고 내 쉐어링크를 발급한다.
+
+    봇이 쓴다. 브라우저 열기·잠금·로그인 확인까지 여기서 처리하므로
+    부르는 쪽은 결과만 보면 된다.
+    (링크, 상품정보) 또는 (None, (사유코드, 설명)).
+    """
+    try:
+        with profile_lock(PROFILE_DIR, log=log), sync_playwright() as pw:
+            ctx = open_context(pw)
+            try:
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                if not goto_products(page):
+                    return None, ("login", "토스 쉐어링크 세션이 만료되었습니다")
+                return issue_for_product(page, taca_id, log=log)
+            finally:
+                ctx.close()
+    except LockBusy as e:
+        return None, ("busy", f"지금 다른 작업이 브라우저를 쓰고 있습니다: {e}")
+    except Exception as e:
+        log(f"발급 중 오류: {e}")
+        return None, ("error", f"발급 중 오류가 났습니다: {e}")
 
 
 def main():

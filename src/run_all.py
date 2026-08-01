@@ -37,8 +37,11 @@ STATUS_PATH = os.path.join(HERE, "status.json")
 EXPORT_PATH = os.path.join(HERE, "export.txt")
 
 # ── 주기 ──────────────────────────────────────────────────────────
-# 이 방의 딜은 선착순이고 물량이 소진되면 끝난다. 45분마다 확인하면
-# 이미 늦는다. 5분으로 줄여 실시간에 가깝게 잡는다(소유자 지시 2026-07-29).
+# 20분(소유자 지시 2026-08-01).
+#
+# 이 방의 딜은 선착순이라 늦으면 소진된다. 그렇다고 5분으로 두면 한 바퀴가
+# 끝나기도 전에 다음 바퀴가 오는 경우가 생긴다 — 카톡 내보내기만 30초,
+# 링크 생성이 붙으면 한 바퀴가 몇 분씩 걸린다. 20분이 그 사이다.
 #
 # ⚠️ 주기를 줄여도 파트너스 접근이 늘지 않는다. 오히려 줄어든다.
 # 링크 생성 쪽에 MAX_DEAL_AGE_HOURS 필터가 있어서 **신규 딜이 없는 주기에는
@@ -46,17 +49,18 @@ EXPORT_PATH = os.path.join(HERE, "export.txt")
 # 주기마다 4건씩 소화하며 하루 100번 넘게 접근했다. 그 링크는 아무도 안 썼다.
 # CLAUDE.md 제약 2 는 그대로 지킨다 — MAX_LINKS_PER_CYCLE 과 사이 대기 6초는
 # 손대지 않았다.
-#
-# 한 바퀴는 신규 딜이 없으면 카톡 내보내기(약 30초) + 딜 추출뿐이라 짧다.
-CYCLE_MINUTES = int(os.environ.get("CYCLE_MINUTES", "5"))
+CYCLE_MINUTES = int(os.environ.get("CYCLE_MINUTES", "20"))
 MAX_LINKS_PER_CYCLE = 4     # 파트너스 접근 횟수. 낮게 유지할 것.
 CONSECUTIVE_FAIL_ALERT = 2  # 이만큼 연속 실패하면 알림
 
 # 토스는 몇 주기마다 한 번만 돌린다.
-# 토스는 딜방이 아니라 대시보드 목록에서 상품을 고르므로 5분마다 새로 볼
-# 것이 없다. 매 주기 4건씩 발급하면 118개짜리 목록을 두어 시간에 다 긁는다.
-# 기본값은 CYCLE_MINUTES=5 기준으로 약 1시간에 한 번이다.
-TOSS_EVERY_N_CYCLES = int(os.environ.get("TOSS_EVERY_N_CYCLES", "12"))
+# 토스는 딜방이 아니라 대시보드 핫 목록에서 상품을 고르므로 20분마다 새로
+# 볼 것이 없다. 매 주기 4건씩 발급하면 117개짜리 목록을 반나절에 다 긁는다.
+# 기본값은 CYCLE_MINUTES=20 기준으로 약 1시간에 한 번이다.
+#
+# 다 긁고 나면 새 상품이 올라오기 전까지 발급이 0건이 된다. 이건 고장이
+# 아니라 정상이다 — pick() 이 이미 있는 제목을 건너뛰기 때문이다.
+TOSS_EVERY_N_CYCLES = int(os.environ.get("TOSS_EVERY_N_CYCLES", "3"))
 
 
 def log(msg, level="INFO"):
@@ -175,8 +179,14 @@ def cycle(room, dry_run=False, cycle_no=0):
     results["deliver"] = ok
     if "설정이 없습니다" in out:
         # 여기서 알림을 보내봐야 같은 채널이라 도착하지 않는다. 로그로 남긴다.
-        log("텔레그램 설정이 없습니다. TG_BOT_TOKEN / TG_CHAT_ID 를 "
-            "`.env` 에 넣으세요. `py src/telegram_deliver.py --whoami` 참고", "ERROR")
+        log("텔레그램 설정이 없습니다. TG_BOT_TOKEN 을 `.env` 에 넣으세요. "
+            "`py src/telegram_deliver.py --whoami` 참고", "ERROR")
+    if "받을 사람이 없습니다" in out:
+        # 문구는 다 만들어 놨는데 갈 곳이 없는 상태다. 조용히 두면
+        # '오늘은 딜이 없었나 보다' 로 오인한다.
+        log("만들어 둔 문구를 받을 사람이 없습니다. 텔레그램에서 봇에게 "
+            "/start 를 보내세요. `py src/telegram_deliver.py --subscribers` 로 "
+            "확인할 수 있습니다.", "ERROR")
 
     return results, None
 

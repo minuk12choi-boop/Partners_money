@@ -14,18 +14,24 @@ Threads 자동 발행 대신 **사람이 직접 올리는** 경로다(소유자 
 두 곳이 어긋난다. 사람이 복사해 붙여넣는 순간 그 문구가 곧 게시물이므로
 자동 발행 때와 똑같이 엄격해야 한다.
 
+**받는 사람은 봇에 /start 한 구독자 전원이다**(소유자 지시 2026-08-01).
+전에는 `.env` 의 `TG_CHAT_ID` 한 명에게만 갔다. 목록은 `subscribers` 테이블에
+있고 `telegram_bot.py` 가 채운다. `TG_CHAT_ID` 는 소유자 본인이므로 /start 를
+안 했어도 항상 포함한다.
+
 사용법
 
-    py src/telegram_deliver.py --whoami     # chat_id 알아내기 (최초 1회)
-    py src/telegram_deliver.py --dry-run    # 보내지 않고 문구만 확인
-    py src/telegram_deliver.py              # 실제 전송
+    py src/telegram_deliver.py --subscribers # 누가 받는지 확인
+    py src/telegram_deliver.py --whoami      # chat_id 알아내기 (최초 1회)
+    py src/telegram_deliver.py --dry-run     # 보내지 않고 문구만 확인
+    py src/telegram_deliver.py               # 실제 전송
     py src/telegram_deliver.py --limit 3
     py src/telegram_deliver.py --resend 5140279812   # 이미 보낸 걸 다시
 
 설정 (.env)
 
     TG_BOT_TOKEN=@BotFather 에서 받은 토큰
-    TG_CHAT_ID=--whoami 로 알아낸 숫자
+    TG_CHAT_ID=--whoami 로 알아낸 숫자 (소유자 본인. 관리자 권한도 겸한다)
 
 의존성: requests (requirements.txt 에 이미 있음)
 """
@@ -40,8 +46,9 @@ from datetime import datetime, date, timedelta
 
 import requests
 
+import subscribers
 from env import load_env
-from schema import ensure_deals
+from schema import ensure_all
 from threads_post import build_text   # 고지 문구 규칙의 단일 출처
 
 load_env()
@@ -145,6 +152,37 @@ def send(token, chat_id, header, body):
                 disable_web_page_preview="true")
 
 
+# 구독자 사이의 간격. 텔레그램은 서로 다른 대화라도 초당 약 30건을 넘기면
+# 429 를 준다. 구독자가 늘어날수록 여기가 먼저 막힌다.
+SLEEP_BETWEEN_SUBS = 0.15
+
+
+def broadcast(conn, token, targets, header, body):
+    """구독자 전원에게 보낸다. (성공 수, 실패 수).
+
+    한 명이 봇을 차단해도 나머지는 계속 간다. 차단은 구독을 꺼서 다음
+    주기에 같은 실패를 반복하지 않게 한다.
+    """
+    ok = fail = 0
+    for i, cid in enumerate(targets):
+        try:
+            send(token, cid, header, body)
+        except Exception as e:
+            fail += 1
+            msg = str(e)
+            if subscribers.is_permanent(msg):
+                subscribers.stop(conn, cid, msg[:200])
+                log(f"  구독 해제 [{cid}]: {msg[:80]}")
+            else:
+                log(f"  전송 실패 [{cid}]: {msg[:120]}")
+            continue
+        subscribers.bump(conn, cid)
+        ok += 1
+        if i < len(targets) - 1:
+            time.sleep(SLEEP_BETWEEN_SUBS)
+    return ok, fail
+
+
 # ---------------------------------------------------------------- DB
 
 def load_pending(conn, resend=None):
@@ -206,10 +244,28 @@ def main():
                     help="한 번에 보낼 최대 개수 (0 = 제한 없음)")
     ap.add_argument("--resend", metavar="상품ID",
                     help="이미 보낸 건을 다시 보낸다")
+    ap.add_argument("--subscribers", action="store_true",
+                    help="구독자 목록을 보여주고 종료")
     args = ap.parse_args()
 
     token = os.environ.get("TG_BOT_TOKEN")
-    chat_id = os.environ.get("TG_CHAT_ID")
+
+    if args.subscribers:
+        conn = sqlite3.connect(DB_PATH)
+        ensure_all(conn)
+        rows = subscribers.listing(conn)
+        a, t = subscribers.count(conn)
+        log(f"구독자 {t}명 (받는 중 {a}명)\n")
+        for cid, uname, name, joined, act, cnt, err in rows:
+            mark = "●" if act else "○"
+            who = name or (f"@{uname}" if uname else "?")
+            log(f"  {mark} {cid:<14} {who[:20]:<20} 가입 {joined} "
+                f"보냄 {cnt}건" + (f"  ← {err[:40]}" if err else ""))
+        if not rows:
+            log("  아직 아무도 /start 하지 않았습니다.")
+            log("  텔레그램에서 봇을 열고 '시작' 을 눌러 주세요.")
+        conn.close()
+        return
 
     if args.whoami:
         if not token:
@@ -221,7 +277,7 @@ def main():
         sys.exit(0 if do_whoami(token) else 1)
 
     conn = sqlite3.connect(DB_PATH)
-    ensure_deals(conn)
+    ensure_all(conn)
     rows = load_pending(conn, args.resend)
 
     if not rows:
@@ -266,13 +322,24 @@ def main():
         conn.close()
         return
 
-    if not (token and chat_id):
-        missing = [k for k, v in (("TG_BOT_TOKEN", token),
-                                  ("TG_CHAT_ID", chat_id)) if not v]
+    if not token:
         raise SystemExit(
-            "설정이 없습니다: " + ", ".join(missing) + "\n"
-            "  `py src/telegram_deliver.py --whoami` 로 chat_id 를 알아낸 뒤\n"
-            "  저장소 루트 `.env` 에 적으세요.")
+            "설정이 없습니다: TG_BOT_TOKEN\n"
+            "  텔레그램에서 @BotFather 에게 /newbot 을 보내 봇을 만들고,\n"
+            "  받은 토큰을 저장소 루트 `.env` 에 적으세요.")
+
+    # 받을 사람 = /start 한 구독자 전원 (+ .env 의 TG_CHAT_ID)
+    targets = subscribers.active(conn)
+    if not targets:
+        # 조용히 0건으로 끝나면 '보낼 게 없었다' 와 구분이 안 된다.
+        # 실제로는 만들어 둔 문구가 갈 곳이 없는 상태다.
+        log(f"보낼 항목 {len(rows)}건이 있는데 받을 사람이 없습니다.")
+        log("  텔레그램에서 봇을 열고 '시작'(/start) 을 눌러 주세요.")
+        log("  누가 등록됐는지: py src/telegram_deliver.py --subscribers")
+        conn.close()
+        sys.exit(1)
+
+    log(f"받는 사람 {len(targets)}명")
 
     ok = fail = 0
     for i, r in enumerate(rows, 1):
@@ -287,16 +354,19 @@ def main():
             fail += 1
             continue
 
-        try:
-            send(token, chat_id, make_header(r, n_today + ok + 1), body)
-        except Exception as e:
-            log(f"전송 실패 [{tag}]: {e}")
+        sent, failed = broadcast(conn, token, targets,
+                                 make_header(r, n_today + ok + 1), body)
+        if not sent:
+            log(f"전송 실패 [{tag}]: 아무에게도 못 보냈습니다")
             fail += 1
             continue
 
+        # 한 명에게라도 갔으면 보낸 것으로 본다. 여기서 표시하지 않으면
+        # 다음 주기에 같은 딜이 전원에게 다시 간다.
         mark_sent(conn, r["platform"], r["product_id"])
         ok += 1
-        log(f"보냄 [{tag}] {r['title'][:40]}")
+        log(f"보냄 [{tag}] {r['title'][:40]} → {sent}명"
+            + (f" (실패 {failed})" if failed else ""))
         if i < len(rows):
             time.sleep(SLEEP_BETWEEN)
 

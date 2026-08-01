@@ -6,27 +6,40 @@ telegram_bot.py — 텔레그램으로 받은 것을 발행 문구로 만들어 
 주기 작업(`run_all.py`)이 자동으로 잡아오는 것과 별개로, 사장님이 직접
 발견한 딜을 그 자리에서 문구로 만들 수 있게 한다.
 
-두 가지를 받는다.
+세 가지를 받는다.
 
-  1) **내 토스 쉐어링크** — `https://toss.im/_m/XXXX`
-     토스 앱에서 직접 발급한 링크를 붙여넣으면 상품명을 확인해 양식을 만든다.
-     가격·할인율은 같이 붙여넣은 텍스트에서 읽는다(딜방 메시지를 통째로
-     붙여넣으면 그대로 잡힌다).
-
-  2) **딜방의 쿠팡 글 통째로** — 방장 링크가 들어 있는 메시지
+  1) **딜방 글 통째로 (쿠팡)** — 방장 링크가 들어 있는 메시지
      방장 링크를 해석해 상품을 알아낸 뒤 **내 파트너스 딥링크를 새로 만들어**
      바꿔 끼운다. 방장 링크는 절대 그대로 내보내지 않는다.
+
+  2) **딜방 글 통째로 (토스)** — 방장 쉐어링크가 들어 있는 메시지
+     상품 ID 만 뽑아내고 방장 링크는 버린다. 그 상품이 쉐어링크 대시보드
+     큐레이션 목록에 있으면 **내 쉐어링크를 새로 발급해** 바꿔 끼운다.
+     목록에 없으면 만들 방법이 없으므로 그렇다고 말한다(아래 참고).
+
+  3) **내 토스 쉐어링크** — `https://toss.im/_m/XXXX`
+     토스 앱에서 직접 발급한 링크를 붙여넣으면 상품명을 확인해 양식을 만든다.
+     가격·할인율은 같이 붙여넣은 텍스트에서 읽는다.
 
 ────────────────────────────────────────────────────────────────
 ⚠️ 토스와 쿠팡은 처리 방식이 다르다. 헷갈리면 남의 링크를 발행하게 된다.
 
-  쿠팡: 상품만 알면 내 링크를 **만들 수 있다** → 방장 글을 그대로 받아도 안전
-  토스: 상품을 지정해 링크를 만들 **방법이 없다**(PC 웹에 검색이 없음, 실측)
-        → 링크는 사장님이 앱에서 직접 만들어 주셔야 한다
+  쿠팡: URL 만 있으면 어떤 상품이든 내 링크를 만들 수 있다
+  토스: **대시보드 큐레이션 목록(약 117개) 안에 있는 상품만** 만들 수 있다.
+        PC 웹에 상품 검색이 없어서(실측) 목록 밖 상품은 방법이 없다.
+        그때는 사장님이 토스 앱에서 직접 발급하셔야 한다.
 
-  그래서 딜방의 토스 글을 붙여넣으면 **거절한다.** 그 글의 토스 링크는
-  방장 것이고, 그걸로 만들면 수익이 방장에게 간다.
+  어느 경우에도 **방장 링크를 그대로 내보내지 않는다.** 그러면 수익이
+  방장에게 간다. 링크를 못 만들면 만들지 못했다고 말한다.
 ────────────────────────────────────────────────────────────────
+
+**권한**
+
+  - 누구나 `/start` 로 구독할 수 있다 → 주기 작업이 만든 문구를 받는다
+  - 링크를 보내 **변환을 시키는 것은 관리자만** (`TG_CHAT_ID`/`TG_ADMIN_IDS`)
+    변환 한 번이 곧 소유자 PC 의 브라우저로 파트너스·토스에 접근하는
+    것이라, 아무나 시킬 수 있으면 접근 빈도 제한(CLAUDE.md 제약 2)이
+    그대로 깨진다.
 
 사용법
 
@@ -48,8 +61,9 @@ from datetime import datetime
 
 import requests
 
+import subscribers
 from env import load_env
-from schema import ensure_deals
+from schema import ensure_all
 from threads_post import build_text
 
 import kakao_deal_extract as K
@@ -72,6 +86,9 @@ API = "https://api.telegram.org/bot{token}/{method}"
 NO_PRICE = "가격 미확인"
 
 RE_TOSS_SHARE = re.compile(r"https?://toss\.im/_m/[A-Za-z0-9]+")
+# 상품 주소까지 포함한다. 딜방은 둘 다 올린다.
+RE_TOSS_ANY = re.compile(
+    r"https?://(?:toss\.im/_m/[A-Za-z0-9]+|toss\.shopping/t/\d+\S*)")
 RE_COUPANG_ANY = re.compile(
     r"https?://(?:link\.coupang\.com/\S+|www\.coupang\.com/vp/products/\S+)")
 
@@ -81,7 +98,15 @@ RE_ROOM_MARKER = re.compile(
 
 HELP = """무엇을 보내면 되는지 알려드릴게요.
 
-1) 내 토스 쉐어링크 + 숫자 두 개
+1) 딜방 글을 통째로 복사해서 보내기 (쿠팡·토스 둘 다)
+   방장 링크는 버리고 사장님 링크를 새로 만들어 드립니다.
+   가격·할인율은 그 글에서 읽습니다.
+
+   토스는 쉐어링크 대시보드에 있는 상품만 만들 수 있습니다.
+   목록에 없으면 그렇다고 알려 드립니다. 그때는 토스 앱에서 직접
+   발급하신 링크를 보내 주세요.
+
+2) 내 토스 쉐어링크 + 숫자 두 개
    https://toss.im/_m/abc123 7990 24800
 
    앞이 판매가, 뒤가 정가입니다. 할인율은 알아서 계산합니다.
@@ -89,16 +114,22 @@ HELP = """무엇을 보내면 되는지 알려드릴게요.
    상품명은 링크에서 자동으로 가져오니 안 치셔도 됩니다.
 
    딜방에 올라왔던 상품이면 숫자도 안 치셔도 됩니다. 링크만 보내세요.
-   이미 받아 둔 가격에서 찾습니다.
+   이미 받아 둔 가격에서 찾습니다."""
 
-2) 딜방의 쿠팡 글
-   방장 글을 통째로 복사해서 보내세요.
-   방장 링크는 버리고 사장님 파트너스 링크를 새로 만들어 드립니다.
-   가격·할인율은 그 글에서 읽습니다.
+WELCOME = """구독되었습니다. 새 딜이 올라오면 바로 보내 드릴게요.
 
-※ 딜방의 토스 글은 처리할 수 없습니다. 토스는 상품을 지정해서 링크를
-   만들 방법이 없어서(PC 웹에 검색이 없음), 사장님이 앱에서 직접 발급한
-   링크가 필요합니다."""
+받으신 글은 그대로 복사해서 스레드에 올리시면 됩니다.
+대가성 고지 문구가 이미 들어 있으니 지우지 마세요.
+
+그만 받으시려면 /stop 을 보내 주세요."""
+
+# 구독자(관리자가 아닌 사람)가 링크를 보냈을 때.
+NOT_ADMIN = """받아 보시는 것만 됩니다. 링크 변환은 운영자만 할 수 있어요.
+
+변환 한 번에 쿠팡·토스 사이트에 실제로 접속하기 때문에,
+아무나 시킬 수 있게 두면 계정이 막힙니다.
+
+새 딜은 올라오는 대로 보내 드립니다. 그만 받으시려면 /stop 입니다."""
 
 
 def log(msg=""):
@@ -377,6 +408,75 @@ def handle_toss(conn, text, share_url, shot=None):
     return (header, body + hint), None
 
 
+def handle_toss_room(conn, text, deal_url):
+    """딜방의 토스 글 → **내** 쉐어링크를 새로 발급해 양식.
+
+    방장 링크는 어떤 상품인지 알아내는 데만 쓰고 버린다. 그대로
+    내보내면 수익이 방장에게 간다.
+
+    쿠팡과 달리 아무 상품이나 되는 게 아니다. 토스 PC 웹에는 상품 검색이
+    없어서(실측) 대시보드 큐레이션 목록에 있는 상품만 발급할 수 있다.
+    없으면 없다고 말한다 — 방장 링크로 대신하지 않는다.
+    """
+    session = requests.Session()
+    product_url, product_id = K.resolve_toss_url(deal_url, session)
+    if not product_id:
+        return None, ("링크를 해석하지 못했습니다.\n"
+                      f"{deal_url}\n"
+                      "잠시 뒤 다시 시도해 주세요.")
+
+    # 이미 내 링크를 만들어 둔 상품이면 다시 발급하지 않는다.
+    # 발급 횟수는 아껴야 하고, 같은 상품에 링크가 여러 개 생길 이유도 없다.
+    row = conn.execute(
+        "SELECT affiliate_url FROM deals WHERE platform='toss' AND product_id=? "
+        "AND affiliate_url IS NOT NULL AND affiliate_url != ''",
+        (product_id,)).fetchone()
+    my_link, info = (row[0], None) if row else (None, None)
+    if my_link:
+        log(f"이미 발급해 둔 링크 재사용: {my_link}")
+    else:
+        my_link, info = T.issue_one(product_id, log=log)
+
+    if not my_link:
+        code, why = info if isinstance(info, tuple) else ("error", str(info))
+        if code == "dashboard_miss":
+            return None, (
+                "이 상품은 쉐어링크 대시보드 목록에 없어서 링크를 만들 수 "
+                "없습니다.\n\n"
+                "토스는 PC 웹에 상품 검색이 없어서, 대시보드가 골라 둔 "
+                "상품(약 117개)만\n자동으로 발급할 수 있습니다.\n\n"
+                "토스 앱에서 이 상품의 쉐어링크를 직접 발급하신 뒤\n"
+                "그 링크와 함께 이 글을 다시 보내 주세요.\n\n"
+                f"상품: https://toss.shopping/t/{product_id}")
+        if code == "login":
+            return None, ("토스 쉐어링크 세션이 만료되었습니다.\n"
+                          "PC 에서 `py src/toss_link.py --login` 을 실행해 주세요.")
+        return None, f"내 쉐어링크를 만들지 못했습니다.\n{why}"
+
+    info = info or {}
+    # 가격은 딜방 글이 가장 정확하다. 방장이 앱에서 보고 적은 값이다.
+    # 글 없이 링크만 보내신 경우에는 뒤에 적어 주신 숫자, 그다음 대시보드 순.
+    price = K.guess_price(text)
+    original = None
+    if not price:
+        price, original = parse_manual_prices(text)
+    price = price or info.get("price")
+    pct, amt = K.guess_discount(text)
+    pct = pct if pct is not None else info.get("discount_pct")
+    original = original or info.get("original_price")
+    title = (K.guess_title(text, deal_url) or info.get("title")
+             or K.fetch_toss_title(product_url, session) or "")
+    if not title:
+        return None, "상품명을 확인하지 못했습니다."
+
+    body = build_text(title, price, my_link, "toss", pct, amt, original)
+    save(conn, "toss", product_id, title, price, product_url,
+         my_link, text, pct, amt, original)
+    header = (f"🛒 토스 · {f'{price:,}원' if price else NO_PRICE}"
+              f" · 내 링크로 교체됨")
+    return (header, body), None
+
+
 def handle_coupang(conn, text, deal_url, shot=None):
     """딜방 쿠팡 글 → 내 딥링크로 바꿔 양식."""
     session = requests.Session()
@@ -449,10 +549,10 @@ def handle_message(conn, text, shot=None):
     text = (text or "").strip()
     if not text:
         return None, HELP
-    if text.startswith("/start") or text.startswith("/help"):
+    if text.startswith("/help"):
         return None, HELP
 
-    toss = RE_TOSS_SHARE.search(text)
+    toss = RE_TOSS_ANY.search(text)
     coupang = RE_COUPANG_ANY.search(text)
     is_room = bool(RE_ROOM_MARKER.search(text))
 
@@ -462,25 +562,26 @@ def handle_message(conn, text, shot=None):
         return handle_coupang(conn, text, coupang.group(0), shot)
 
     if toss:
-        # 딜방 원문에 들어 있는 토스 링크는 방장 것이다. 그대로 쓰면
-        # 수익이 방장에게 간다. 명령으로 명시하지 않으면 거절한다.
-        if is_room and not text.lstrip().startswith("/toss"):
-            return None, (
-                "이건 딜방 원문으로 보입니다. 안에 있는 토스 링크는 방장 것이라\n"
-                "그대로 쓰면 수익이 방장에게 갑니다.\n\n"
-                "토스는 상품을 지정해 링크를 만들 방법이 없어서(PC 웹에 검색이\n"
-                "없음), 사장님이 토스 앱에서 직접 발급하셔야 합니다.\n\n"
-                "발급하신 뒤 이렇게 보내 주세요. 가격·할인율은 아래 붙여넣은\n"
-                "글에서 읽습니다.\n\n"
-                "/toss https://toss.im/_m/내링크\n"
-                "(그 아래에 딜방 글을 붙여넣기)")
-        return handle_toss(conn, text, toss.group(0), shot)
+        url = toss.group(0)
+        # 이 링크가 내 것인지 방장 것인지 구분한다. 틀리면 방장 링크를
+        # 그대로 발행하게 되므로 애매하면 '내 것이 아니다' 쪽으로 판단한다.
+        #
+        #   딜방 원문 표시가 있다        → 방장 것
+        #   toss.shopping/t/ 상품 주소   → 애초에 쉐어링크가 아니다
+        #   그 외 toss.im/_m/            → 사장님이 직접 보내신 내 링크
+        #
+        # '방장 것' 이면 상품 ID 만 뽑고 링크는 버린 뒤 내 링크를 새로 발급한다.
+        mine = (RE_TOSS_SHARE.match(url) and not is_room
+                and not text.lstrip().startswith("/deal"))
+        if mine:
+            return handle_toss(conn, text, url, shot)
+        return handle_toss_room(conn, text, url)
 
     return None, HELP
 
 
 def has_link(text):
-    return bool(RE_TOSS_SHARE.search(text or "")
+    return bool(RE_TOSS_ANY.search(text or "")
                 or RE_COUPANG_ANY.search(text or ""))
 
 
@@ -489,7 +590,7 @@ RE_BARE_NUM = re.compile(r"\d[\d,]*")
 # 숫자만 적으셨는지 판별할 때, 숫자 말고 있어도 되는 것들.
 # ⚠️ 순서가 중요하다. 문자클래스를 앞에 두면 '/toss' 의 '/' 만 먹고
 #    'toss' 가 남아 직접 입력이 통째로 무시된다(실측).
-RE_ALLOWED_LEFTOVER = re.compile(r"/toss|정가|판매가|[\s,원%/\-~+]")
+RE_ALLOWED_LEFTOVER = re.compile(r"/deal|/toss|정가|판매가|[\s,원%/\-~+]")
 
 
 def parse_manual_prices(text):
@@ -552,14 +653,47 @@ def build_and_reply(conn, token, chat, text, shot):
     return bool(result) and NO_PRICE in result[0]
 
 
-def process(conn, token, chat_id, msg):
-    chat = str((msg.get("chat") or {}).get("id", ""))
+def process(conn, token, msg):
+    chat_obj = msg.get("chat") or {}
+    chat = str(chat_obj.get("id", ""))
     text = msg.get("text") or msg.get("caption") or ""
     photos = msg.get("photo")
+    cmd = text.strip().lower()
 
-    # 사장님 대화만 받는다. 봇 주소를 아는 다른 사람이 쓰면 안 된다.
-    if chat_id and chat != str(chat_id):
-        log(f"모르는 대화 {chat} 무시")
+    # ── 구독 (누구나 된다)
+    if cmd.startswith("/start"):
+        new = subscribers.add(conn, chat_obj)
+        a, t = subscribers.count(conn)
+        log(f"구독 {'신규' if new else '재개'}: {chat} (받는 사람 {a}명)")
+        send_text(token, chat, WELCOME)
+        if subscribers.is_admin(chat):
+            send_text(token, chat, HELP)
+        return
+
+    if cmd.startswith("/stop"):
+        subscribers.stop(conn, chat, "사용자 요청")
+        log(f"구독 해지: {chat}")
+        send_text(token, chat, "그만 받겠습니다. 다시 받으시려면 /start 입니다.")
+        return
+
+    # ── 여기부터는 관리자만
+    #
+    # 변환 한 번이 곧 소유자 PC 의 브라우저로 쿠팡 파트너스·토스에 접근하는
+    # 것이다. 아무나 시킬 수 있으면 접근 빈도 제한(CLAUDE.md 제약 2)이
+    # 그대로 깨지고 계정이 막힌다. 받는 것은 누구나, 시키는 것은 관리자만.
+    if not subscribers.is_admin(chat):
+        log(f"관리자 아님 {chat} — 변환 거절")
+        send_text(token, chat, NOT_ADMIN)
+        return
+
+    if cmd.startswith("/subs"):
+        a, t = subscribers.count(conn)
+        lines = [f"구독자 {t}명 (받는 중 {a}명)", ""]
+        for cid, uname, name, joined, act, cnt, err in subscribers.listing(conn):
+            who = name or (f"@{uname}" if uname else "?")
+            lines.append(f"{'●' if act else '○'} {who[:20]} · {joined[:10]} "
+                         f"· {cnt}건")
+        send_text(token, chat, "\n".join(lines))
         return
 
     if text.strip().startswith("/cancel"):
@@ -644,14 +778,19 @@ def main():
     chat_id = os.environ.get("TG_CHAT_ID")
     if not token:
         raise SystemExit("TG_BOT_TOKEN 이 없습니다. `.env` 를 확인하세요.")
-    if not chat_id:
-        log("⚠️ TG_CHAT_ID 가 없습니다. 아무 대화나 받게 됩니다.")
+    if not subscribers.admin_ids():
+        # 관리자가 없으면 링크 변환을 시킬 사람이 아무도 없다. 구독·전달은
+        # 그대로 되므로 죽이지는 않지만, 조용히 넘어가면 "봇이 안 되네" 가 된다.
+        log("⚠️ TG_CHAT_ID 가 없습니다. 링크 변환을 시킬 수 있는 사람이 "
+            "아무도 없습니다.")
+        log("   `py src/telegram_deliver.py --whoami` 로 확인해 `.env` 에 넣으세요.")
 
     conn = sqlite3.connect(DB_PATH)
-    ensure_deals(conn)
+    ensure_all(conn)
 
     me = call("getMe", token)
-    log(f"봇 시작: @{me.get('username')}")
+    a, t = subscribers.count(conn)
+    log(f"봇 시작: @{me.get('username')} · 구독자 {t}명(받는 중 {a}명)")
     offset = load_offset()
 
     while True:
@@ -669,7 +808,7 @@ def main():
             offset = u["update_id"] + 1
             msg = u.get("message") or u.get("edited_message")
             if msg:
-                process(conn, token, chat_id, msg)
+                process(conn, token, msg)
             save_offset(offset)
 
         if args.once:

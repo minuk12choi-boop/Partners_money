@@ -61,3 +61,34 @@ def ensure_deals(conn, verbose=True):
                 print(f"deals 테이블에 {name} 컬럼을 추가합니다...")
             conn.execute(f"ALTER TABLE deals ADD COLUMN {name} {typ}")
     conn.commit()
+
+
+# ── 구독자 ────────────────────────────────────────────────────────
+# 봇에게 /start 를 보낸 사람들. 주기 작업이 만든 문구는 여기 있는
+# 사람 전원에게 간다. 전에는 `.env` 의 TG_CHAT_ID 한 명에게만 갔다.
+#
+# `active` 를 두는 이유: 사람이 봇을 차단하면 텔레그램이 403 을 준다.
+# 그때 지우지 않고 꺼 둔다. 지워 버리면 다음 주기에 또 보내려다 또
+# 403 을 받고, 왜 실패하는지도 남지 않는다.
+SUBSCRIBERS_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS subscribers (
+        chat_id    TEXT PRIMARY KEY,
+        username   TEXT,
+        name       TEXT,
+        joined_at  TEXT,
+        active     INTEGER NOT NULL DEFAULT 1,
+        stopped_at TEXT,
+        last_error TEXT,
+        sent_count INTEGER NOT NULL DEFAULT 0
+    )
+"""
+
+
+def ensure_subscribers(conn, verbose=True):
+    conn.execute(SUBSCRIBERS_SCHEMA)
+    conn.commit()
+
+
+def ensure_all(conn, verbose=True):
+    ensure_deals(conn, verbose)
+    ensure_subscribers(conn, verbose)
