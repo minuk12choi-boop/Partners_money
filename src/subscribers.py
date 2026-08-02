@@ -154,28 +154,27 @@ def is_permanent(msg):
     return any(p in m for p in PERMANENT)
 
 
-# ── 변환 속도 제한 ────────────────────────────────────────────────
+# ── 변환 속도 제한 — 기본은 **꺼져 있다** ─────────────────────────
 #
-# 소유자 지시(2026-08-02)로 변환을 구독자 전원에게 열었다. 전에는
-# 관리자만이었다. "어차피 아는 사람이 쓴다" 는 판단이고, 누가 쓰느냐는
-# 소유자가 정할 일이다.
+# 소유자 지시(2026-08-03)로 껐다. 요청이 오는 대로 바로 처리한다.
 #
-# ⚠️ 하지만 **속도는 못 연다.** 변환 한 번이 곧 이 PC 의 브라우저로 쿠팡
-# 파트너스·토스에 접속하는 것이다. 사람이 열 명이면 접근도 열 배가 되고,
-# 그러면 CLAUDE.md 제약 2(접근 빈도를 올리지 마라)가 사람 손으로 깨진다.
-# 제약 2 는 어떤 이유로도 완화하지 않는다.
+#   "제약 풀고 요청할때마다 확인되도록해라.
+#    어차피 아는 사람끼리 쓰는거라 최대 2명이 사용자다. 그냥해라."
 #
-# 그래서 **권한은 열되 총량으로 묶는다.** 누가 시키든 사이트에 닿는
-# 빈도는 그대로다.
+# 앞서 총량 제한을 넣었던 이유는 이랬다: 변환 한 번이 곧 이 PC 의
+# 브라우저로 쿠팡·토스에 접속하는 것이라, 사람이 늘면 접근도 사람 수만큼
+# 늘어난다는 것. 그 걱정은 **사용자가 2명이면 성립하지 않는다.** 사람이
+# 몇인지는 소유자가 아는 사실이고, 판단은 소유자 몫이다.
 #
-#   PER_HOUR      전체 합계. 주기 작업(20분마다 쿠팡4+토스4)과 비슷한 수준
-#   PER_HOUR_EACH 한 사람이 혼자 다 쓰지 못하게
-#   MIN_GAP       연달아 누르는 것을 막는다. 제약 2 의 sleep(6) 과 같은 값
+# ⚠️ CLAUDE.md 제약 2 자체는 그대로다. 그건 **주기 작업**의 값
+# (MAX_LINKS_PER_CYCLE = 4, 링크 생성 사이 sleep(6))을 말하고, 그 둘은
+# 손대지 않았다. 여기서 끈 것은 사람이 직접 보낼 때의 추가 관문이다.
 #
-# 셋 다 `.env` 로 조절할 수 있다. 올릴 때는 제약 2 를 다시 읽을 것.
-CONVERT_PER_HOUR = int(os.environ.get("CONVERT_PER_HOUR", "20"))
-CONVERT_PER_HOUR_EACH = int(os.environ.get("CONVERT_PER_HOUR_EACH", "8"))
-CONVERT_MIN_GAP = int(os.environ.get("CONVERT_MIN_GAP", "6"))
+# 다시 켜려면 `.env` 에 숫자를 넣으면 된다. 0 은 '제한 없음' 이다.
+# 사람이 늘면 켜는 것을 고려할 것.
+CONVERT_PER_HOUR = int(os.environ.get("CONVERT_PER_HOUR", "0"))
+CONVERT_PER_HOUR_EACH = int(os.environ.get("CONVERT_PER_HOUR_EACH", "0"))
+CONVERT_MIN_GAP = int(os.environ.get("CONVERT_MIN_GAP", "0"))
 
 
 def _since(hours=1):
@@ -189,11 +188,15 @@ def convert_allowed(conn, chat_id):
     된다. **전체 총량과 간격은 관리자도 지킨다** — 사이트가 보는 것은
     누가 눌렀는지가 아니라 얼마나 자주 닿았는지다.
     """
+    # 셋 다 0 이면 제한이 없다. 기본값이 이쪽이다(소유자 지시 2026-08-03).
+    if not (CONVERT_PER_HOUR or CONVERT_PER_HOUR_EACH or CONVERT_MIN_GAP):
+        return True, ""
+
     ensure_conversions(conn)
     now = datetime.now()
 
     last = conn.execute("SELECT MAX(at) FROM conversions").fetchone()[0]
-    if last:
+    if CONVERT_MIN_GAP and last:
         try:
             gap = (now - datetime.fromisoformat(last)).total_seconds()
         except ValueError:
@@ -202,15 +205,16 @@ def convert_allowed(conn, chat_id):
             return False, (f"조금만 천천히요. {int(CONVERT_MIN_GAP - gap) + 1}초 뒤에 "
                            "다시 보내 주세요.")
 
-    total = conn.execute("SELECT COUNT(*) FROM conversions WHERE at >= ?",
-                         (_since(),)).fetchone()[0]
-    if total >= CONVERT_PER_HOUR:
-        return False, ("지금은 변환이 밀렸습니다. 한 시간에 "
-                       f"{CONVERT_PER_HOUR}건까지만 됩니다.\n"
-                       "쿠팡·토스에 너무 자주 접속하면 계정이 막혀서 둔 제한입니다.\n"
-                       "잠시 뒤에 다시 보내 주세요.")
+    if CONVERT_PER_HOUR:
+        total = conn.execute("SELECT COUNT(*) FROM conversions WHERE at >= ?",
+                             (_since(),)).fetchone()[0]
+        if total >= CONVERT_PER_HOUR:
+            return False, ("지금은 변환이 밀렸습니다. 한 시간에 "
+                           f"{CONVERT_PER_HOUR}건까지만 됩니다.\n"
+                           "쿠팡·토스에 너무 자주 접속하면 계정이 막혀서 둔 제한입니다.\n"
+                           "잠시 뒤에 다시 보내 주세요.")
 
-    if not is_admin(chat_id):
+    if CONVERT_PER_HOUR_EACH and not is_admin(chat_id):
         mine = conn.execute(
             "SELECT COUNT(*) FROM conversions WHERE chat_id=? AND at >= ?",
             (str(chat_id), _since())).fetchone()[0]

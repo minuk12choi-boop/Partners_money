@@ -155,6 +155,15 @@ def test_per_subscriber_delivery():
     import telegram_deliver as D
     conn = fresh_db()
 
+    # ⚠️ 시각은 **지금 기준 상대값**으로 만든다. 고정 날짜를 박으면
+    # load_pending() 의 MAX_DEAL_AGE_HOURS(12시간) 필터에 걸려서 하루만
+    # 지나도 시험이 깨진다. 실제로 그렇게 깨졌다(2026-08-03).
+    from datetime import datetime, timedelta
+    now = datetime.now()
+
+    def ts(hours_ago):
+        return (now - timedelta(hours=hours_ago)).isoformat(timespec="seconds")
+
     def deal(pid, found_at):
         conn.execute(
             "INSERT INTO deals (platform, product_id, title, price, "
@@ -163,12 +172,12 @@ def test_per_subscriber_delivery():
         conn.commit()
         return {"platform": "toss", "product_id": pid, "found_at": found_at}
 
-    old = deal("A", "2026-08-02T08:00:00")   # 가입 전에 올라온 딜
-    new = deal("B", "2026-08-02T09:00:00")   # 가입 후에 올라온 딜
+    old = deal("A", ts(3))     # 가입 전에 올라온 딜
+    new = deal("B", ts(1))     # 가입 후에 올라온 딜
 
     S.add(conn, {"id": 700, "first_name": "늦게온사람"})
     conn.execute("UPDATE subscribers SET joined_at=? WHERE chat_id='700'",
-                 ("2026-08-02T08:30:00",))
+                 (ts(2),))
     conn.commit()
 
     targets = ["999", "700"]                  # 999 = 소유자(가입 기록 없음)
@@ -197,8 +206,7 @@ def test_per_subscriber_delivery():
           ["700", "999"])
 
     # load_pending 이 sent_at 으로 거르면 안 된다. 사람마다 다르기 때문이다.
-    conn.execute("UPDATE deals SET sent_at='2026-08-02T09:10:00' "
-                 "WHERE product_id='B'")
+    conn.execute("UPDATE deals SET sent_at=? WHERE product_id='B'", (ts(0),))
     conn.commit()
     pend = [r["product_id"] for r in D.load_pending(conn)]
     check("보낸 딜도 후보에는 남는다(사람마다 다르므로)", "B" in pend, True)
@@ -232,15 +240,25 @@ def test_routing():
             r, _ = B.handle_message(conn, text)
             return r[0] if r else "HELP"
 
-        # 이 네 줄이 이 프로젝트에서 제일 비싼 실수를 막는다.
-        # ROOM 으로 안 가면 방장 링크를 그대로 발행하게 된다.
+        # 이 묶음이 이 프로젝트에서 제일 비싼 실수를 막는다.
+        # ROOM 으로 안 가면 남의 링크를 그대로 발행하게 된다.
         check("딜방 토스 글 → 내 링크 새로 발급", route(ROOM_TOSS), "ROOM")
         check("맨 토스 상품주소 → 내 링크 새로 발급",
               route("https://toss.shopping/t/524516537"), "ROOM")
         check("/deal 을 붙이면 강제로 새로 발급",
               route("/deal https://toss.im/_m/myLink"), "ROOM")
-        check("내가 보낸 쉐어링크 → 그대로 사용",
-              route("https://toss.im/_m/myLink 7990 24800"), "MINE")
+
+        # ⚠️ 2026-08-03 소유자 지시로 기본값을 뒤집었다.
+        # "그냥 타링크가 투척될 것임. 내 링크라는 언급은 없을 것임."
+        # 표시 없는 쉐어링크는 남의 것으로 본다. 되돌리지 말 것 —
+        # 되돌리면 남의 링크를 그대로 발행하게 된다.
+        check("표시 없는 쉐어링크 → 남의 것으로 보고 새로 발급",
+              route("https://toss.im/_m/someoneElse"), "ROOM")
+        check("가격만 붙은 쉐어링크도 남의 것으로 본다",
+              route("https://toss.im/_m/someoneElse 7990 24800"), "ROOM")
+        check("/mine 을 붙여야 그대로 쓴다",
+              route("/mine https://toss.im/_m/myLink 7990 24800"), "MINE")
+
         check("딜방 쿠팡 글 → 내 딥링크", route(ROOM_COUPANG), "COUPANG")
         check("링크 없으면 안내문", route("안녕하세요"), "HELP")
     finally:
@@ -249,13 +267,16 @@ def test_routing():
 
 
 def test_permission():
-    """변환은 구독자 누구나. 단 속도는 총량으로 묶인다.
+    """변환은 구독자 누구나. 속도 제한은 기본으로 꺼져 있다.
 
-    2026-08-02 소유자 지시로 관리자 전용에서 구독자 전원으로 열었다.
-    **속도 제한까지 같이 풀면 CLAUDE.md 제약 2 가 사람 손으로 깨진다.**
-    변환 한 번이 곧 쿠팡·토스 접속 한 번이다.
+    2026-08-02 관리자 전용 → 구독자 전원으로 열었고,
+    2026-08-03 소유자 지시로 속도 제한도 껐다("사용자가 최대 2명이다").
+
+    끈 것은 사람이 직접 보낼 때의 추가 관문이다. CLAUDE.md 제약 2 가
+    말하는 주기 작업의 값(MAX_LINKS_PER_CYCLE, sleep(6))은 그대로다.
+    제한은 `.env` 로 언제든 되살릴 수 있어야 하므로 그 동작도 함께 지킨다.
     """
-    section("권한 — 구독자면 변환 가능, 속도는 총량으로 묶인다")
+    section("권한 — 구독자면 변환 가능, 제한은 기본 꺼짐")
     import subscribers as S
     import telegram_bot as B
     conn = fresh_db()
@@ -287,6 +308,16 @@ def test_permission():
         sent.clear()
         B.process(conn, "t", msg(888, "https://toss.im/_m/x"))
         check("미구독자는 변환을 못 시킨다", sent[-1][1], B.NOT_SUBSCRIBED)
+
+        # 기본값(전부 0)에서는 몇 번을 보내도 막히지 않아야 한다.
+        S.CONVERT_PER_HOUR = S.CONVERT_PER_HOUR_EACH = S.CONVERT_MIN_GAP = 0
+        conn.execute("DELETE FROM conversions")
+        conn.commit()
+        sent.clear()
+        for _ in range(5):
+            B.process(conn, "t", msg(555, "https://toss.im/_m/x"))
+        check("기본값에서는 연달아 보내도 안 막힌다",
+              [s[1] for s in sent], ["BODY"] * 5)
 
         # 1인당 상한. 한 사람이 총량을 다 쓰지 못하게 한다.
         S.CONVERT_PER_HOUR_EACH = 2
