@@ -143,6 +143,68 @@ def test_broadcast():
     conn.close()
 
 
+def test_per_subscriber_delivery():
+    """늦게 가입한 사람도 받는가.
+
+    이걸 틀리면 소유자에게만 가고 구독자에게는 아무것도 안 간다.
+    실제로 그랬다(2026-08-02): 딜 하나가 누구에게든 나가면 `sent_at` 이
+    채워져 잠기고, 그 뒤에 /start 한 사람은 영원히 못 받았다.
+    """
+    section("사람별 전달 — 늦게 가입해도 받는가")
+    import subscribers as S
+    import telegram_deliver as D
+    conn = fresh_db()
+
+    def deal(pid, found_at):
+        conn.execute(
+            "INSERT INTO deals (platform, product_id, title, price, "
+            "affiliate_url, found_at) VALUES ('toss',?,?,1000,?,?)",
+            (pid, f"상품{pid}", f"https://toss.im/_m/{pid}", found_at))
+        conn.commit()
+        return {"platform": "toss", "product_id": pid, "found_at": found_at}
+
+    old = deal("A", "2026-08-02T08:00:00")   # 가입 전에 올라온 딜
+    new = deal("B", "2026-08-02T09:00:00")   # 가입 후에 올라온 딜
+
+    S.add(conn, {"id": 700, "first_name": "늦게온사람"})
+    conn.execute("UPDATE subscribers SET joined_at=? WHERE chat_id='700'",
+                 ("2026-08-02T08:30:00",))
+    conn.commit()
+
+    targets = ["999", "700"]                  # 999 = 소유자(가입 기록 없음)
+    joined = D.joined_map(conn)
+
+    # 소유자는 가입 시각을 모르므로 거르지 않는다. 자기 것은 다 받아야 한다.
+    check("가입 전 딜은 새 구독자에게 안 간다",
+          D.pick_targets(conn, old, targets, joined), ["999"])
+    check("가입 후 딜은 새 구독자에게 간다",
+          sorted(D.pick_targets(conn, new, targets, joined)), ["700", "999"])
+
+    # 한 명에게 보냈다고 나머지가 막히면 안 된다 — 이게 원래 버그였다.
+    D.mark_delivered(conn, "toss", "B", "999")
+    check("한 명이 받아도 나머지는 아직 받을 수 있다",
+          D.pick_targets(conn, new, targets, joined), ["700"])
+
+    D.mark_delivered(conn, "toss", "B", "700")
+    check("이미 받은 사람에게 두 번 가지 않는다",
+          D.pick_targets(conn, new, targets, joined), [])
+
+    # 가입 직후 아무것도 안 오면 고장으로 보인다. 최근 몇 건은 예외로 준다.
+    # 반대로 제한이 없으면 첫인사가 스팸 수십 통이 된다.
+    check("가입 전 딜이라도 최근 것이면 준다",
+          sorted(D.pick_targets(conn, old, targets, joined,
+                                catchup={("toss", "A")})),
+          ["700", "999"])
+
+    # load_pending 이 sent_at 으로 거르면 안 된다. 사람마다 다르기 때문이다.
+    conn.execute("UPDATE deals SET sent_at='2026-08-02T09:10:00' "
+                 "WHERE product_id='B'")
+    conn.commit()
+    pend = [r["product_id"] for r in D.load_pending(conn)]
+    check("보낸 딜도 후보에는 남는다(사람마다 다르므로)", "B" in pend, True)
+    conn.close()
+
+
 # ---------------------------------------------------------------- 봇 분기
 
 ROOM_TOSS = """✅ 실리콘 주방장갑 2P 내열 방수
@@ -373,7 +435,8 @@ def test_disclosure():
 
 # ---------------------------------------------------------------- 메인
 
-TESTS = [test_subscribers, test_broadcast, test_routing, test_permission,
+TESTS = [test_subscribers, test_broadcast, test_per_subscriber_delivery,
+         test_routing, test_permission,
          test_manual_prices, test_find_card, test_issue_guard,
          test_room_to_mine, test_disclosure]
 

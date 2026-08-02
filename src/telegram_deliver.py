@@ -157,11 +157,68 @@ def send(token, chat_id, header, body):
 SLEEP_BETWEEN_SUBS = 0.15
 
 
-def broadcast(conn, token, targets, header, body):
-    """구독자 전원에게 보낸다. (성공 수, 실패 수).
+def mark_delivered(conn, platform, product_id, chat_id):
+    conn.execute(
+        "INSERT OR REPLACE INTO deliveries "
+        "(platform, product_id, chat_id, sent_at) VALUES (?,?,?,?)",
+        (platform, product_id, str(chat_id),
+         datetime.now().isoformat(timespec="seconds")))
+    conn.commit()
+
+
+def already_got(conn, platform, product_id):
+    return {str(r[0]) for r in conn.execute(
+        "SELECT chat_id FROM deliveries WHERE platform=? AND product_id=?",
+        (platform, product_id))}
+
+
+# 새로 가입한 사람에게 지난 딜을 몇 건까지 줄 것인가.
+#
+# 0 이면 가입 후에 올라온 것만 준다. 그러면 가입 직후에는 아무것도 오지
+# 않아서 고장난 것처럼 보인다(실측: 신선한 딜 29건이 전부 가입 직전에
+# 올라와 새 구독자가 0건을 받았다).
+#
+# 반대로 제한이 없으면 지난 12시간치를 한꺼번에 맞는다. 실측 시점 기준
+# 44건이었다. 봇이 건네는 첫인사가 스팸 44통이면 바로 차단당한다.
+#
+# 최근 몇 건만 준다. 바로 값어치를 보여 주면서 스팸은 아니다.
+WELCOME_CATCHUP = int(os.environ.get("WELCOME_CATCHUP", "3"))
+
+
+def pick_targets(conn, row, targets, joined, catchup=()):
+    """이 딜을 **아직 못 받은** 사람만 고른다.
+
+    두 가지를 건다.
+
+      1. 이미 받은 사람은 뺀다 (`deliveries`)
+      2. 가입 전에 올라온 딜은 보내지 않는다.
+         단 `catchup` 에 든 최근 몇 건은 예외다 — 위 상수 설명 참고.
+
+    소유자(`TG_CHAT_ID`)는 `subscribers` 에 없을 수 있다. 그때는 가입
+    시각을 모르므로 거르지 않는다. 자기 것은 다 받아야 한다.
+    """
+    got = already_got(conn, row["platform"], row["product_id"])
+    is_recent = (row["platform"], row["product_id"]) in catchup
+    out = []
+    for cid in targets:
+        cid = str(cid)
+        if cid in got:
+            continue
+        j = joined.get(cid)
+        if j and row.get("found_at") and row["found_at"] < j and not is_recent:
+            continue
+        out.append(cid)
+    return out
+
+
+def broadcast(conn, token, targets, header, body, row=None):
+    """받을 사람들에게 보낸다. (성공 수, 실패 수).
 
     한 명이 봇을 차단해도 나머지는 계속 간다. 차단은 구독을 꺼서 다음
     주기에 같은 실패를 반복하지 않게 한다.
+
+    보낸 사람은 `deliveries` 에 즉시 기록한다. 중간에 죽어도 이미 받은
+    사람에게 다시 가지 않는다.
     """
     ok = fail = 0
     for i, cid in enumerate(targets):
@@ -177,6 +234,8 @@ def broadcast(conn, token, targets, header, body):
                 log(f"  전송 실패 [{cid}]: {msg[:120]}")
             continue
         subscribers.bump(conn, cid)
+        if row:
+            mark_delivered(conn, row["platform"], row["product_id"], cid)
         ok += 1
         if i < len(targets) - 1:
             time.sleep(SLEEP_BETWEEN_SUBS)
@@ -186,8 +245,14 @@ def broadcast(conn, token, targets, header, body):
 # ---------------------------------------------------------------- DB
 
 def load_pending(conn, resend=None):
+    """보낼 후보. **누가 받았는지는 여기서 보지 않는다.**
+
+    ⚠️ 전에는 `sent_at IS NULL` 로 걸렀다. 그러면 딜 하나가 누구에게든
+    나가는 순간 잠겨서, 나중에 가입한 사람은 영원히 못 받는다(실측).
+    받았는지는 사람마다 다르므로 `pick_targets()` 가 판정한다.
+    """
     cols = ("platform, product_id, title, price, affiliate_url, "
-            "discount_pct, discount_amt, original_price")
+            "discount_pct, discount_amt, original_price, found_at")
     if resend:
         rows = conn.execute(
             f"SELECT {cols} FROM deals "
@@ -199,7 +264,7 @@ def load_pending(conn, resend=None):
         rows = conn.execute(
             f"SELECT {cols} FROM deals "
             "WHERE affiliate_url IS NOT NULL AND affiliate_url != '' "
-            "AND sent_at IS NULL AND posted_at IS NULL "
+            "AND posted_at IS NULL "
             "AND found_at >= ? "
             "ORDER BY found_at DESC",
             ((datetime.now() - timedelta(hours=MAX_DEAL_AGE_HOURS))
@@ -207,8 +272,14 @@ def load_pending(conn, resend=None):
     return [{"platform": r[0], "product_id": r[1], "title": r[2],
              "price": r[3], "affiliate_url": r[4],
              "discount_pct": r[5], "discount_amt": r[6],
-             "original_price": r[7]}
+             "original_price": r[7], "found_at": r[8]}
             for r in rows if str(r[4]).startswith("http")]
+
+
+def joined_map(conn):
+    """chat_id → 가입 시각. 가입 전 딜을 걸러내는 데 쓴다."""
+    return {str(r[0]): r[1] for r in conn.execute(
+        "SELECT chat_id, joined_at FROM subscribers")}
 
 
 def sent_today(conn):
@@ -341,9 +412,23 @@ def main():
 
     log(f"받는 사람 {len(targets)}명")
 
-    ok = fail = 0
+    joined = joined_map(conn)
+    # `rows` 는 found_at 내림차순이다. 앞의 몇 건이 '가장 최근'이고,
+    # 새로 가입한 사람에게 이것까지는 준다.
+    catchup = {(r["platform"], r["product_id"]) for r in rows[:WELCOME_CATCHUP]}
+
+    ok = fail = skip = 0
     for i, r in enumerate(rows, 1):
         tag = f"{r['platform']}:{r['product_id']}"
+
+        # 이 딜을 아직 못 받은 사람만. 전원이 이미 받았으면 건너뛴다.
+        # `--resend` 는 이미 받았어도 다시 보내라는 뜻이므로 거르지 않는다.
+        who = (targets if args.resend
+               else pick_targets(conn, r, targets, joined, catchup))
+        if not who:
+            skip += 1
+            continue
+
         try:
             body = build_text(r["title"], r["price"], r["affiliate_url"],
                               r["platform"], r.get("discount_pct"),
@@ -354,21 +439,24 @@ def main():
             fail += 1
             continue
 
-        sent, failed = broadcast(conn, token, targets,
-                                 make_header(r, n_today + ok + 1), body)
+        sent, failed = broadcast(conn, token, who,
+                                 make_header(r, n_today + ok + 1), body, r)
         if not sent:
             log(f"전송 실패 [{tag}]: 아무에게도 못 보냈습니다")
             fail += 1
             continue
 
-        # 한 명에게라도 갔으면 보낸 것으로 본다. 여기서 표시하지 않으면
-        # 다음 주기에 같은 딜이 전원에게 다시 간다.
+        # `sent_at` 은 '한 명에게라도 나갔다' 는 뜻으로 남긴다. 누가 받았는지는
+        # `deliveries` 가 사람별로 갖고 있으므로 여기에 의존하지 않는다.
         mark_sent(conn, r["platform"], r["product_id"])
         ok += 1
         log(f"보냄 [{tag}] {r['title'][:40]} → {sent}명"
             + (f" (실패 {failed})" if failed else ""))
         if i < len(rows):
             time.sleep(SLEEP_BETWEEN)
+
+    if skip:
+        log(f"건너뜀 {skip}건 (받는 사람 전원이 이미 받음)")
 
     conn.close()
     log(f"\n전송 결과: 성공 {ok} / 실패 {fail}")

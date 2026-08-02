@@ -89,6 +89,57 @@ def ensure_subscribers(conn, verbose=True):
     conn.commit()
 
 
+# ── 누가 무엇을 받았는가 ──────────────────────────────────────────
+# **왜 필요한가** (2026-08-02 실측)
+#
+# 전에는 `deals.sent_at` 하나로 판정했다. 딜 하나가 **누구에게든** 나가면
+# 그 딜은 '보냄' 으로 잠긴다. 그래서 나중에 /start 한 사람은 그 딜을
+# 영원히 못 받는다. 실제로 그렇게 됐다: 구독자 1명이 08:58 에 가입했는데
+# 링크 44건이 전부 08:55 이전에 '보냄' 으로 잠겨 있어 0건을 받았다.
+# 소유자에게만 가고 구독자에게는 아무것도 안 갔다.
+#
+# 그래서 (딜, 사람) 단위로 기록한다. 이러면
+#   · 늦게 가입한 사람도 자기가 못 받은 것을 받는다
+#   · 이미 받은 사람에게 두 번 가지 않는다
+#
+# `deals.sent_at` 은 남겨 둔다. '한 명에게라도 나갔다' 는 뜻으로 계속
+# 쓰이고(리포트·오늘 N번째), 없애면 옛 기록의 뜻이 사라진다.
+DELIVERIES_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS deliveries (
+        platform   TEXT NOT NULL,
+        product_id TEXT NOT NULL,
+        chat_id    TEXT NOT NULL,
+        sent_at    TEXT,
+        PRIMARY KEY (platform, product_id, chat_id)
+    )
+"""
+
+
+def ensure_deliveries(conn, verbose=True):
+    conn.execute(DELIVERIES_SCHEMA)
+
+    # 옛 DB 를 위한 한 번짜리 이관.
+    #
+    # 이미 보낸 딜(sent_at 있음)은 소유자에게 간 것이다. 그 기록이 없으면
+    # 이 코드로 바꾼 직후 소유자가 지난 딜을 통째로 다시 받는다.
+    n = conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0]
+    if n:
+        return
+    import os
+    owner = (os.environ.get("TG_CHAT_ID") or "").strip()
+    if not owner:
+        conn.commit()
+        return
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO deliveries (platform, product_id, chat_id, sent_at) "
+        "SELECT platform, product_id, ?, sent_at FROM deals "
+        "WHERE sent_at IS NOT NULL", (owner,))
+    if verbose and cur.rowcount:
+        print(f"이미 보낸 {cur.rowcount}건을 소유자({owner}) 수신 기록으로 옮깁니다...")
+    conn.commit()
+
+
 def ensure_all(conn, verbose=True):
     ensure_deals(conn, verbose)
     ensure_subscribers(conn, verbose)
+    ensure_deliveries(conn, verbose)
