@@ -139,7 +139,38 @@ def ensure_deliveries(conn, verbose=True):
     conn.commit()
 
 
+# ── 변환 요청 기록 ────────────────────────────────────────────────
+# 봇으로 링크 변환을 시킨 기록. 접근 속도를 재는 데만 쓴다.
+#
+# **왜 필요한가** (2026-08-02 소유자 지시)
+#
+# 전에는 변환을 관리자만 할 수 있었다. 소유자가 "텔레그램에 들어온 사람은
+# 모두 되게 하라, 어차피 아는 사람이 쓴다" 고 정했다. 그 판단은 따른다.
+#
+# 다만 변환 한 번이 곧 이 PC 의 브라우저로 쿠팡 파트너스·토스에 접속하는
+# 것이다. 사람이 늘면 접근 빈도가 사람 수만큼 늘고, 그러면 CLAUDE.md
+# 제약 2(접근 빈도를 올리지 마라)가 사람 손으로 깨진다. 제약 2 는 완화
+# 대상이 아니다.
+#
+# 그래서 **권한은 열되 속도는 총량으로 묶는다.** 누가 시키든 사이트에
+# 닿는 빈도는 그대로다. 그 판정에 이 표를 쓴다.
+CONVERSIONS_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS conversions (
+        chat_id TEXT NOT NULL,
+        at      TEXT NOT NULL
+    )
+"""
+
+
+def ensure_conversions(conn, verbose=True):
+    conn.execute(CONVERSIONS_SCHEMA)
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_conversions_at "
+                 "ON conversions (at)")
+    conn.commit()
+
+
 def ensure_all(conn, verbose=True):
     ensure_deals(conn, verbose)
     ensure_subscribers(conn, verbose)
     ensure_deliveries(conn, verbose)
+    ensure_conversions(conn, verbose)

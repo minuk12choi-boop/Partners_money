@@ -25,9 +25,9 @@ subscribers.py — 봇에게 /start 를 보낸 사람 목록
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from schema import ensure_subscribers
+from schema import ensure_subscribers, ensure_conversions
 
 
 def admin_ids():
@@ -48,6 +48,20 @@ def admin_ids():
 
 def is_admin(chat_id):
     return str(chat_id) in admin_ids()
+
+
+def is_subscribed(conn, chat_id):
+    """변환을 시킬 수 있는 사람인가.
+
+    소유자 지시(2026-08-02)로 **구독자 전원**이 시킬 수 있다.
+    관리자는 `/start` 를 안 눌렀어도 된다.
+    """
+    if is_admin(chat_id):
+        return True
+    ensure_subscribers(conn)
+    r = conn.execute("SELECT active FROM subscribers WHERE chat_id=?",
+                     (str(chat_id),)).fetchone()
+    return bool(r and r[0])
 
 
 def add(conn, chat):
@@ -135,3 +149,79 @@ PERMANENT = ("bot was blocked by the user", "user is deactivated",
 def is_permanent(msg):
     m = (msg or "").lower()
     return any(p in m for p in PERMANENT)
+
+
+# ── 변환 속도 제한 ────────────────────────────────────────────────
+#
+# 소유자 지시(2026-08-02)로 변환을 구독자 전원에게 열었다. 전에는
+# 관리자만이었다. "어차피 아는 사람이 쓴다" 는 판단이고, 누가 쓰느냐는
+# 소유자가 정할 일이다.
+#
+# ⚠️ 하지만 **속도는 못 연다.** 변환 한 번이 곧 이 PC 의 브라우저로 쿠팡
+# 파트너스·토스에 접속하는 것이다. 사람이 열 명이면 접근도 열 배가 되고,
+# 그러면 CLAUDE.md 제약 2(접근 빈도를 올리지 마라)가 사람 손으로 깨진다.
+# 제약 2 는 어떤 이유로도 완화하지 않는다.
+#
+# 그래서 **권한은 열되 총량으로 묶는다.** 누가 시키든 사이트에 닿는
+# 빈도는 그대로다.
+#
+#   PER_HOUR      전체 합계. 주기 작업(20분마다 쿠팡4+토스4)과 비슷한 수준
+#   PER_HOUR_EACH 한 사람이 혼자 다 쓰지 못하게
+#   MIN_GAP       연달아 누르는 것을 막는다. 제약 2 의 sleep(6) 과 같은 값
+#
+# 셋 다 `.env` 로 조절할 수 있다. 올릴 때는 제약 2 를 다시 읽을 것.
+CONVERT_PER_HOUR = int(os.environ.get("CONVERT_PER_HOUR", "20"))
+CONVERT_PER_HOUR_EACH = int(os.environ.get("CONVERT_PER_HOUR_EACH", "8"))
+CONVERT_MIN_GAP = int(os.environ.get("CONVERT_MIN_GAP", "6"))
+
+
+def _since(hours=1):
+    return (datetime.now() - timedelta(hours=hours)).isoformat(timespec="seconds")
+
+
+def convert_allowed(conn, chat_id):
+    """지금 변환을 시켜도 되는가. (된다, 안 되면 이유).
+
+    관리자는 1인당 제한을 받지 않는다. 소유자 계정이므로 스스로 조절하면
+    된다. **전체 총량과 간격은 관리자도 지킨다** — 사이트가 보는 것은
+    누가 눌렀는지가 아니라 얼마나 자주 닿았는지다.
+    """
+    ensure_conversions(conn)
+    now = datetime.now()
+
+    last = conn.execute("SELECT MAX(at) FROM conversions").fetchone()[0]
+    if last:
+        try:
+            gap = (now - datetime.fromisoformat(last)).total_seconds()
+        except ValueError:
+            gap = CONVERT_MIN_GAP
+        if gap < CONVERT_MIN_GAP:
+            return False, (f"조금만 천천히요. {int(CONVERT_MIN_GAP - gap) + 1}초 뒤에 "
+                           "다시 보내 주세요.")
+
+    total = conn.execute("SELECT COUNT(*) FROM conversions WHERE at >= ?",
+                         (_since(),)).fetchone()[0]
+    if total >= CONVERT_PER_HOUR:
+        return False, ("지금은 변환이 밀렸습니다. 한 시간에 "
+                       f"{CONVERT_PER_HOUR}건까지만 됩니다.\n"
+                       "쿠팡·토스에 너무 자주 접속하면 계정이 막혀서 둔 제한입니다.\n"
+                       "잠시 뒤에 다시 보내 주세요.")
+
+    if not is_admin(chat_id):
+        mine = conn.execute(
+            "SELECT COUNT(*) FROM conversions WHERE chat_id=? AND at >= ?",
+            (str(chat_id), _since())).fetchone()[0]
+        if mine >= CONVERT_PER_HOUR_EACH:
+            return False, (f"한 시간에 {CONVERT_PER_HOUR_EACH}건까지만 됩니다.\n"
+                           "잠시 뒤에 다시 보내 주세요.")
+
+    return True, ""
+
+
+def convert_record(conn, chat_id):
+    ensure_conversions(conn)
+    conn.execute("INSERT INTO conversions (chat_id, at) VALUES (?,?)",
+                 (str(chat_id), datetime.now().isoformat(timespec="seconds")))
+    # 오래된 기록은 지운다. 속도를 재는 데만 쓰므로 하루면 충분하다.
+    conn.execute("DELETE FROM conversions WHERE at < ?", (_since(24),))
+    conn.commit()

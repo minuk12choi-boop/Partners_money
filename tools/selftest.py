@@ -249,16 +249,25 @@ def test_routing():
 
 
 def test_permission():
-    section("권한 — 받는 것은 누구나, 시키는 것은 관리자만")
+    """변환은 구독자 누구나. 단 속도는 총량으로 묶인다.
+
+    2026-08-02 소유자 지시로 관리자 전용에서 구독자 전원으로 열었다.
+    **속도 제한까지 같이 풀면 CLAUDE.md 제약 2 가 사람 손으로 깨진다.**
+    변환 한 번이 곧 쿠팡·토스 접속 한 번이다.
+    """
+    section("권한 — 구독자면 변환 가능, 속도는 총량으로 묶인다")
+    import subscribers as S
     import telegram_bot as B
     conn = fresh_db()
     os.environ["TG_CHAT_ID"] = "777"
 
     sent = []
     saved = (B.send_text, B.send_body, B.handle_message)
+    real_gap = S.CONVERT_MIN_GAP
     B.send_text = lambda tok, chat, text: sent.append((str(chat), text))
     B.send_body = lambda tok, chat, h, b: sent.append((str(chat), "BODY"))
     B.handle_message = lambda c, t, s=None: (("헤더", "본문"), None)
+    S.CONVERT_MIN_GAP = 0        # 간격은 따로 시험한다
     try:
         def msg(cid, text):
             return {"chat": {"id": cid, "first_name": "홍"}, "text": text}
@@ -268,13 +277,51 @@ def test_permission():
 
         sent.clear()
         B.process(conn, "t", msg(555, "https://toss.im/_m/x"))
-        check("구독자는 변환을 못 시킨다", sent[-1][1], B.NOT_ADMIN)
+        check("구독자도 변환할 수 있다", sent[-1][1], "BODY")
 
         sent.clear()
         B.process(conn, "t", msg(777, "https://toss.im/_m/x"))
-        check("관리자는 변환된다", sent[-1][1], "BODY")
+        check("관리자도 변환된다", sent[-1][1], "BODY")
+
+        # 구독하지 않은 사람은 안 된다. /start 를 먼저 눌러야 한다.
+        sent.clear()
+        B.process(conn, "t", msg(888, "https://toss.im/_m/x"))
+        check("미구독자는 변환을 못 시킨다", sent[-1][1], B.NOT_SUBSCRIBED)
+
+        # 1인당 상한. 한 사람이 총량을 다 쓰지 못하게 한다.
+        S.CONVERT_PER_HOUR_EACH = 2
+        conn.execute("DELETE FROM conversions")
+        conn.commit()
+        sent.clear()
+        for _ in range(3):
+            B.process(conn, "t", msg(555, "https://toss.im/_m/x"))
+        check("1인당 상한을 넘으면 거절", "한 시간에" in sent[-1][1], True)
+
+        # 전체 총량. 사람이 몇이든 사이트에 닿는 빈도는 그대로여야 한다.
+        S.CONVERT_PER_HOUR_EACH = 100
+        S.CONVERT_PER_HOUR = 2
+        conn.execute("DELETE FROM conversions")
+        conn.commit()
+        sent.clear()
+        B.process(conn, "t", msg(555, "https://toss.im/_m/x"))
+        B.process(conn, "t", msg(777, "https://toss.im/_m/x"))
+        B.process(conn, "t", msg(555, "https://toss.im/_m/x"))
+        check("전체 총량을 넘으면 관리자여도 거절",
+              "변환이 밀렸습니다" in sent[-1][1], True)
+
+        # 연달아 누르는 것도 막는다. 제약 2 의 sleep(6) 과 같은 취지.
+        S.CONVERT_PER_HOUR, S.CONVERT_MIN_GAP = 100, 60
+        conn.execute("DELETE FROM conversions")
+        conn.commit()
+        sent.clear()
+        B.process(conn, "t", msg(555, "https://toss.im/_m/x"))
+        B.process(conn, "t", msg(555, "https://toss.im/_m/x"))
+        check("연달아 누르면 간격을 요구한다",
+              "천천히" in sent[-1][1], True)
     finally:
         B.send_text, B.send_body, B.handle_message = saved
+        S.CONVERT_MIN_GAP = real_gap
+        S.CONVERT_PER_HOUR, S.CONVERT_PER_HOUR_EACH = 20, 8
         os.environ.pop("TG_CHAT_ID", None)
     conn.close()
 

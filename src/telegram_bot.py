@@ -123,13 +123,10 @@ WELCOME = """구독되었습니다. 새 딜이 올라오면 바로 보내 드릴
 
 그만 받으시려면 /stop 을 보내 주세요."""
 
-# 구독자(관리자가 아닌 사람)가 링크를 보냈을 때.
-NOT_ADMIN = """받아 보시는 것만 됩니다. 링크 변환은 운영자만 할 수 있어요.
+# 구독하지 않은 사람이 링크를 보냈을 때.
+NOT_SUBSCRIBED = """먼저 /start 를 눌러 주세요.
 
-변환 한 번에 쿠팡·토스 사이트에 실제로 접속하기 때문에,
-아무나 시킬 수 있게 두면 계정이 막힙니다.
-
-새 딜은 올라오는 대로 보내 드립니다. 그만 받으시려면 /stop 입니다."""
+그러면 링크를 보내 변환하실 수 있고, 새 딜도 올라오는 대로 받아 보십니다."""
 
 
 def log(msg=""):
@@ -639,6 +636,22 @@ def reply(token, chat, result, err):
         log("회신: 안내문")
 
 
+def throttle_ok(conn, token, chat):
+    """지금 변환을 시켜도 되는가. 안 되면 이유를 회신하고 False.
+
+    변환은 구독자 누구나 시킬 수 있지만(2026-08-02 소유자 지시),
+    **사이트에 닿는 빈도는 사람 수와 무관하게 일정해야 한다.**
+    CLAUDE.md 제약 2 를 사람 손으로 깨뜨리지 않기 위한 관문이다.
+    """
+    ok, why = subscribers.convert_allowed(conn, chat)
+    if not ok:
+        log(f"속도 제한 {chat}: {why.splitlines()[0]}")
+        send_text(token, chat, why)
+        return False
+    subscribers.convert_record(conn, chat)
+    return True
+
+
 def build_and_reply(conn, token, chat, text, shot):
     """문구를 만들어 보낸다. 가격을 못 채웠으면 True 를 돌려준다."""
     try:
@@ -676,17 +689,11 @@ def process(conn, token, msg):
         send_text(token, chat, "그만 받겠습니다. 다시 받으시려면 /start 입니다.")
         return
 
-    # ── 여기부터는 관리자만
-    #
-    # 변환 한 번이 곧 소유자 PC 의 브라우저로 쿠팡 파트너스·토스에 접근하는
-    # 것이다. 아무나 시킬 수 있으면 접근 빈도 제한(CLAUDE.md 제약 2)이
-    # 그대로 깨지고 계정이 막힌다. 받는 것은 누구나, 시키는 것은 관리자만.
-    if not subscribers.is_admin(chat):
-        log(f"관리자 아님 {chat} — 변환 거절")
-        send_text(token, chat, NOT_ADMIN)
-        return
-
+    # ── 구독자 목록은 관리자만. 남의 이름·가입일이라 아무나 보면 안 된다.
     if cmd.startswith("/subs"):
+        if not subscribers.is_admin(chat):
+            send_text(token, chat, "구독자 목록은 운영자만 볼 수 있어요.")
+            return
         a, t = subscribers.count(conn)
         lines = [f"구독자 {t}명 (받는 중 {a}명)", ""]
         for cid, uname, name, joined, act, cnt, err in subscribers.listing(conn):
@@ -694,6 +701,21 @@ def process(conn, token, msg):
             lines.append(f"{'●' if act else '○'} {who[:20]} · {joined[:10]} "
                          f"· {cnt}건")
         send_text(token, chat, "\n".join(lines))
+        return
+
+    # ── 여기부터는 변환이다. 구독자면 누구나 시킬 수 있다.
+    #
+    # 2026-08-02 소유자 지시로 열었다. 전에는 관리자만이었다.
+    # "텔레그램에 들어온 사람은 모두 되게 하라, 어차피 아는 사람이 쓴다."
+    # 누가 쓰느냐는 소유자가 정할 일이므로 그 판단을 따른다.
+    #
+    # ⚠️ 다만 **속도는 열지 않았다.** 변환 한 번이 곧 이 PC 의 브라우저로
+    # 쿠팡 파트너스·토스에 접속하는 것이라, 사람이 늘면 접근도 사람 수만큼
+    # 늘어난다. 그러면 CLAUDE.md 제약 2(접근 빈도)가 사람 손으로 깨진다.
+    # 제약 2 는 완화 대상이 아니다. 그래서 총량과 간격으로 묶는다.
+    if not subscribers.is_subscribed(conn, chat):
+        log(f"미구독 {chat} — 변환 거절")
+        send_text(token, chat, NOT_SUBSCRIBED)
         return
 
     if text.strip().startswith("/cancel"):
@@ -723,10 +745,13 @@ def process(conn, token, msg):
             pending["text"] if pending and pending.get("text") else None)
 
         if paired:
-            pending_clear(chat)
             # 캡션과 앞서 온 글을 합친다. 딜방 글을 먼저 보내고 사진을
             # 나중에 보내는 경우, 그 글의 가격·할인율도 살려야 한다.
             merged = paired if paired == text else f"{paired}\n{text}".strip()
+            if not throttle_ok(conn, token, chat):
+                # 사진은 그대로 들고 있는다. 잠시 뒤 링크만 다시 보내면 된다.
+                return
+            pending_clear(chat)
             build_and_reply(conn, token, chat, merged, shot)
             return
 
@@ -744,6 +769,9 @@ def process(conn, token, msg):
     if not has_link(text):
         # 링크가 없으면 기다리게 할 것도 없다. 안내만 한다.
         build_and_reply(conn, token, chat, text, None)
+        return
+
+    if not throttle_ok(conn, token, chat):
         return
 
     # 앞서 사진을 보내셨으면 그걸 쓴다.
