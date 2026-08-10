@@ -1,3 +1,10 @@
 requests>=2.31
 playwright>=1.44
 pywinauto>=0.6.8 ; sys_platform == "win32"
+
+# 스크린샷 판독(src/vision_ocr.py)은 쓰지 않기로 했다 — 장당 30원이라
+# 링크 뒤에 숫자를 직접 치는 편이 낫다는 판단.
+# 코드는 남겨 뒀으니 나중에 쓰시려면
+#     py -m pip install "anthropic>=0.116"
+# 하고 .env 에 ANTHROPIC_API_KEY 를 넣으면 된다.
+# 여기 안 넣는 이유: 안 쓰는 의존성을 설치시키지 않기 위함.
