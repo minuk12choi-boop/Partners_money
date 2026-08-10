@@ -138,6 +138,24 @@ def cycle(room, dry_run=False, cycle_no=0):
     """한 바퀴. 각 단계는 앞 단계가 실패해도 가능한 만큼 진행한다."""
     results = {}
 
+    # 0) 공인 IP 확인
+    #
+    # 토스 공식 API 는 **등록한 출발 IP 에서 나가는 요청만** 받는다.
+    # 가정용 회선은 유동 IP 라 어느 날 갑자기 바뀌고, 그 순간부터 토스
+    # 링크 발급이 통째로 막힌다. 무인 운영이라 아무도 모른 채 며칠이
+    # 지날 수 있다 — 무인 운영에서 최악은 조용히 멈추는 것이다.
+    #
+    # 바뀌었을 때만 알린다. 평소에는 조용하다.
+    # 실패해도 나머지 단계는 그대로 진행한다. 쿠팡은 IP 와 무관하다.
+    try:
+        import ip_watch
+        changed, ip = ip_watch.check()
+        if changed:
+            log(f"공인 IP 가 바뀌었습니다 → {ip}. 토스 관리자에 다시 등록해야 합니다.",
+                "ERROR")
+    except Exception as e:
+        log(f"IP 확인 실패(무시하고 계속): {e}", "WARN")
+
     # 1) 카톡 내보내기
     ok, _ = run_step("카톡 내보내기",
                      [PY, "kakao_export.py", "--room", room, "--out", EXPORT_PATH],

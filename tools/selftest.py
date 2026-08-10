@@ -357,6 +357,38 @@ def test_permission():
     conn.close()
 
 
+def test_title_never_url():
+    """상품명 자리에 링크가 들어가면 안 된다.
+
+    실측(2026-08-03): 설명 없이 토스 링크만 보냈더니 그 링크가 상품명으로
+    뽑혀 **발행문 본문에 남의 쉐어링크가 그대로 박혔다.** 구매 링크는 내
+    것으로 바뀌었는데 본문에 남의 링크가 남으면 아무 소용이 없다.
+    """
+    section("상품명 — 링크가 상품명이 되면 안 된다")
+    import kakao_deal_extract as K
+
+    check("토스 링크만 있으면 상품명 없음",
+          K.guess_title("https://toss.im/_m/someoneElse", ""), "")
+    check("쿠팡 링크만 있어도 상품명 없음",
+          K.guess_title("https://link.coupang.com/a/xyz", ""), "")
+    check("링크가 섞인 줄에서 이름만 남는다",
+          K.guess_title("✅ 맛팜 국내산 미니족 https://toss.im/_m/x", ""),
+          "맛팜 국내산 미니족")
+    check("링크가 다음 줄이어도 이름을 고른다",
+          K.guess_title("✅ 저염 백명란 파지\nhttps://toss.im/_m/x", ""),
+          "저염 백명란 파지")
+
+    # 어떤 입력에도 결과에 'http' 가 섞이면 안 된다.
+    for bad in ("https://toss.im/_m/aaa",
+                "http://toss.shopping/t/123",
+                "https://link.coupang.com/a/bbb\nhttps://toss.im/_m/ccc"):
+        if "http" in K.guess_title(bad, ""):
+            check("어떤 입력에도 링크가 상품명이 되지 않는다", False, True)
+            break
+    else:
+        check("어떤 입력에도 링크가 상품명이 되지 않는다", True, True)
+
+
 def test_manual_prices():
     section("직접 입력한 가격 — 할인액을 판매가로 읽지 않는가")
     import telegram_bot as B
@@ -514,7 +546,7 @@ def test_disclosure():
 # ---------------------------------------------------------------- 메인
 
 TESTS = [test_subscribers, test_broadcast, test_per_subscriber_delivery,
-         test_routing, test_permission,
+         test_routing, test_permission, test_title_never_url,
          test_manual_prices, test_find_card, test_issue_guard,
          test_room_to_mine, test_disclosure]
 

@@ -37,6 +37,7 @@ from datetime import datetime
 from playwright.sync_api import sync_playwright
 
 import toss_api
+import toss_openapi
 from env import load_env
 from lock import profile_lock, LockBusy
 from schema import ensure_deals
@@ -677,12 +678,30 @@ def do_run(limit, dry_run, max_price=MAX_PRICE):
 
 
 def issue_one(taca_id, log=log):
-    """상품 ID 하나에 대해 브라우저를 열고 내 쉐어링크를 발급한다.
+    """상품 ID 하나에 대해 내 쉐어링크를 발급한다.
 
-    봇이 쓴다. 브라우저 열기·잠금·로그인 확인까지 여기서 처리하므로
-    부르는 쪽은 결과만 보면 된다.
+    **공식 API 를 먼저 쓴다.** 브라우저 방식은 대시보드 큐레이션 목록
+    (약 120개) 안의 상품만 되지만, API 는 상품 ID 를 직접 지정한다.
+    딜방에 올라오는 딜은 대부분 목록 밖이라 이 차이가 결정적이다.
+    실측(2026-08-03): 대시보드가 거절한 상품이 API 로는 바로 발급됐다.
+
+    API 가 안 되면 브라우저로 넘어간다. 키가 없거나, IP 등록이 풀렸거나,
+    토스가 잠시 막았을 때 그래도 목록 안 상품은 만들 수 있다.
+
     (링크, 상품정보) 또는 (None, (사유코드, 설명)).
     """
+    if toss_openapi.configured():
+        link, info = toss_openapi.issue(taca_id, log=log)
+        if link:
+            log(f"  공식 API 로 발급: {link}")
+            return link, info
+        code = info[0] if isinstance(info, tuple) else "error"
+        # mismatch 는 '다른 상품이 나왔다' 는 뜻이다. 브라우저로 다시
+        # 시도할 일이 아니다 — 같은 사고를 한 번 더 낼 뿐이다.
+        if code == "mismatch":
+            return None, info
+        log(f"  공식 API 실패({code}) — 브라우저로 시도합니다")
+
     try:
         with profile_lock(PROFILE_DIR, log=log), sync_playwright() as pw:
             ctx = open_context(pw)
